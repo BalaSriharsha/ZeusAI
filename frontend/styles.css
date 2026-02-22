@@ -435,6 +435,72 @@ textarea::placeholder { color: var(--text-dim); }
   justify-content: center;
 }
 
+/* -- Provider Selector ------------------------ */
+
+.provider-selector {
+  display: flex;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 3px;
+  margin-bottom: 0.75rem;
+}
+
+.provider-opt {
+  flex: 1;
+  cursor: pointer;
+}
+
+.provider-opt input[type="radio"] {
+  display: none;
+}
+
+.provider-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  transition: all 0.2s;
+  cursor: pointer;
+  border: 1px solid transparent;
+  user-select: none;
+}
+
+.provider-opt input[type="radio"]:checked + .provider-tab {
+  background: var(--surface);
+  border-color: var(--border-light);
+  color: var(--text);
+}
+
+.provider-badge {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  font-family: var(--mono);
+  flex-shrink: 0;
+}
+
+.exotel-badge {
+  background: rgba(0, 229, 160, 0.2);
+  color: var(--accent);
+}
+
+.twilio-badge {
+  background: rgba(248, 113, 113, 0.2);
+  color: #f87171;
+}
+
 /* -- Scenario Selector ------------------------ */
 
 .scenario-selector {
@@ -582,6 +648,7 @@ textarea::placeholder { color: var(--text-dim); }
 .agent-badge.a1 { background: rgba(0, 229, 160, 0.15); color: var(--accent); }
 .agent-badge.a2 { background: rgba(99, 102, 241, 0.15); color: var(--accent2); }
 .agent-badge.a3 { background: rgba(245, 158, 11, 0.15); color: var(--accent3); }
+
 
 /* -- Scrollbar -------------------------------- */
 

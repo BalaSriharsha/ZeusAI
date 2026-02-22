@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Optional
 
-from backend.services import groq_stt, groq_llm
+from backend.services import sarvam_stt, groq_llm
 from backend.models.schemas import (
     UserIntent, IntentType, CallState, CallStatus,
 )
@@ -51,7 +51,7 @@ class InputAgent:
 
     async def process_voice_input(self, audio_bytes: bytes) -> UserIntent:
         """Transcribe audio via Groq Whisper, then extract intent."""
-        raw_text = await groq_stt.transcribe_audio(audio_bytes)
+        raw_text = await sarvam_stt.transcribe_audio(audio_bytes)
         logger.info(f"[Agent1] User said: {raw_text}")
         intent = await self._extract_intent(raw_text)
         intent.raw_text = raw_text

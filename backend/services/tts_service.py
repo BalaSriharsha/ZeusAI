@@ -1,102 +1,101 @@
 """
-Text-to-Speech service using Deepgram Aura.
+Text-to-Speech service using Sarvam AI (Bulbul v3).
 
-Deepgram is used because Groq does not currently offer TTS.
-This module is designed to be swappable — replace with ElevenLabs,
-OpenAI TTS, or any other provider by implementing the same interface.
+Bulbul v3 is purpose-built for Indian languages and accents.
+Supports 11 languages (10 Indian + Indian English), 30+ voices,
+code-mixed text (e.g. Hinglish), and natural Indian prosody.
 
 Setup:
-  1. Sign up at https://console.deepgram.com
+  1. Sign up at https://dashboard.sarvam.ai
   2. Create an API key
-  3. Set DEEPGRAM_API_KEY in your .env
+  3. Set SARVAM_API_KEY in your .env
 
-Available Deepgram Aura voices:
-  - aura-asteria-en   (female, natural)
-  - aura-luna-en      (female, warm)
-  - aura-stella-en    (female, professional)
-  - aura-athena-en    (female, friendly)
-  - aura-hera-en      (female, authoritative)
-  - aura-orion-en     (male, natural)
-  - aura-arcas-en     (male, warm)
-  - aura-perseus-en   (male, deep)
-  - aura-angus-en     (male, casual)
-  - aura-orpheus-en   (male, professional)
-  - aura-helios-en    (male, energetic)
-  - aura-zeus-en      (male, authoritative)
+Available voices (Bulbul v3):
+  Male   : shubh (default), aditya, rahul, rohan, amit, dev, ratan, varun,
+           manan, sumit, kabir, aayan, tarun, sunny, gokul, vijay, mohit
+  Female : ritu, priya, neha, pooja, simran, kavya, ishita, shreya, roopa,
+           tanya, shruti, suhani, kavitha, rupali
+
+Supported language codes:
+  en-IN  Indian English (default)
+  hi-IN  Hindi       | te-IN  Telugu    | ta-IN  Tamil
+  kn-IN  Kannada     | ml-IN  Malayalam | mr-IN  Marathi
+  bn-IN  Bengali     | gu-IN  Gujarati  | pa-IN  Punjabi
+  od-IN  Odia
+
+Docs: https://docs.sarvam.ai/api-reference-docs/api-guides-tutorials/text-to-speech/rest-api
 """
 
 from __future__ import annotations
+import base64
+import io
 import logging
+
 import httpx
 
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-DEEPGRAM_TTS_URL = "https://api.deepgram.com/v1/speak"
+SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
+_MAX_CHARS = 2500
 
 
-async def text_to_speech(
+async def _sarvam_tts(
     text: str,
-    model: str | None = None,
-    sample_rate: int | None = None,
-    encoding: str = "mp3",
+    speech_sample_rate: int,
+    audio_format: str,
+    speaker: str | None = None,
 ) -> bytes:
     """
-    Convert text to speech audio bytes using Deepgram Aura.
+    Core call to Sarvam AI TTS.
 
     Args:
-        text: The text to synthesize
-        model: Deepgram voice model (default from config)
-        sample_rate: Audio sample rate (None lets Deepgram use default;
-                     pass explicitly for mulaw/linear16)
-        encoding: Audio encoding ('mp3' for browser, 'mulaw' for Twilio)
+        text: Text to synthesize (max 2500 chars).
+        speech_sample_rate: 8000 for Twilio mulaw, 24000 for browser.
+        audio_format: "mulaw" for Twilio, "mp3" for browser.
+        speaker: Override the default speaker from config.
 
     Returns:
-        Audio bytes
+        Raw audio bytes.
     """
-    model = model or settings.deepgram_tts_model
+    if len(text) > _MAX_CHARS:
+        text = text[:_MAX_CHARS]
+        logger.warning(f"[TTS] Text truncated to {_MAX_CHARS} chars")
 
-    params = {
-        "model": model,
-        "encoding": encoding,
+    payload = {
+        "text": text,
+        "model": "bulbul:v3",
+        "target_language_code": settings.sarvam_tts_language,
+        "speaker": speaker or settings.sarvam_tts_speaker,
+        "speech_sample_rate": speech_sample_rate,
+        "audio_format": audio_format,
     }
-    if sample_rate is not None:
-        params["sample_rate"] = sample_rate
 
     headers = {
-        "Authorization": f"Token {settings.deepgram_api_key}",
+        "api-subscription-key": settings.sarvam_api_key,
         "Content-Type": "application/json",
     }
 
-    payload = {"text": text}
-
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            DEEPGRAM_TTS_URL,
-            params=params,
+            SARVAM_TTS_URL,
             headers=headers,
             json=payload,
         )
         response.raise_for_status()
-        audio_bytes = response.content
-        logger.info(f"[TTS] Generated {len(audio_bytes)} bytes for: {text[:60]}...")
-        return audio_bytes
+        result = response.json()
 
+    audios = result.get("audios", [])
+    if not audios:
+        raise ValueError(f"Sarvam TTS returned no audio for text: {text[:60]}...")
 
-async def text_to_speech_for_browser(
-    text: str,
-    model: str | None = None,
-) -> bytes:
-    """
-    Generate TTS audio suitable for browser playback (linear16 WAV).
-    """
-    return await text_to_speech(
-        text=text,
-        model=model,
-        sample_rate=24000,
-        encoding="linear16",
+    audio_bytes = base64.b64decode(audios[0])
+    logger.info(
+        f"[TTS] Generated {len(audio_bytes)} bytes "
+        f"({audio_format} {speech_sample_rate}Hz) for: {text[:60]}..."
     )
+    return audio_bytes
 
 
 async def text_to_speech_mp3(
@@ -104,13 +103,14 @@ async def text_to_speech_mp3(
     model: str | None = None,
 ) -> bytes:
     """
-    Generate TTS audio as MP3 for browser playback.
-    Does not pass sample_rate -- lets Deepgram use its default.
+    Generate MP3 audio for browser playback.
+    The `model` parameter is accepted for API compatibility but unused
+    (speaker is configured via SARVAM_TTS_SPEAKER).
     """
-    return await text_to_speech(
+    return await _sarvam_tts(
         text=text,
-        model=model,
-        encoding="mp3",
+        speech_sample_rate=24000,
+        audio_format="mp3",
     )
 
 
@@ -119,66 +119,46 @@ async def text_to_speech_for_twilio(
     model: str | None = None,
 ) -> bytes:
     """
-    Generate TTS audio suitable for Twilio telephony (8kHz mulaw).
+    Generate 8kHz mulaw audio for Twilio Media Streams.
+    The `model` parameter is accepted for API compatibility but unused.
     """
-    return await text_to_speech(
+    return await _sarvam_tts(
         text=text,
-        model=model,
-        sample_rate=8000,
-        encoding="mulaw",
+        speech_sample_rate=8000,
+        audio_format="mulaw",
     )
 
 
-# ──────────────────────────────────────────
-# Alternative TTS providers (swap in as needed)
-# ──────────────────────────────────────────
-
-"""
-# === ElevenLabs TTS ===
-# pip install elevenlabs
-# Set ELEVENLABS_API_KEY in .env
-
-from elevenlabs import generate, set_api_key
-
-set_api_key(os.environ["ELEVENLABS_API_KEY"])
-
-async def text_to_speech_elevenlabs(text: str, voice: str = "Rachel") -> bytes:
-    audio = generate(text=text, voice=voice, model="eleven_turbo_v2_5")
-    return audio
-
-
-# === OpenAI TTS ===
-# pip install openai
-# Set OPENAI_API_KEY in .env
-
-from openai import OpenAI
-
-client = OpenAI()
-
-async def text_to_speech_openai(text: str, voice: str = "alloy") -> bytes:
-    response = client.audio.speech.create(
-        model="tts-1",
-        voice=voice,
-        input=text,
-        response_format="wav",
+async def text_to_speech_for_call(
+    text: str,
+    model: str | None = None,
+) -> bytes:
+    """
+    Generate 8kHz linear16 PCM audio for Exotel Voice Streaming.
+    Returns raw 16-bit little-endian PCM bytes (no WAV header).
+    The `model` parameter is accepted for API compatibility but unused.
+    """
+    audio_bytes = await _sarvam_tts(
+        text=text,
+        speech_sample_rate=8000,
+        audio_format="linear16",
     )
-    return response.content
+    # Strip WAV header if Sarvam returns WAV-wrapped linear16
+    if audio_bytes[:4] == b"RIFF":
+        buf = io.BytesIO(audio_bytes)
+        import wave as _wave
+        with _wave.open(buf, "rb") as wf:
+            return wf.readframes(wf.getnframes())
+    return audio_bytes
 
 
-# === Cartesia TTS (Sonic) ===
-# pip install cartesia
-# Set CARTESIA_API_KEY in .env
-
-import cartesia
-
-client = cartesia.Cartesia(api_key=os.environ["CARTESIA_API_KEY"])
-
-async def text_to_speech_cartesia(text: str) -> bytes:
-    output = client.tts.bytes(
-        model_id="sonic-2024-10-19",
-        transcript=text,
-        voice_id="a0e99841-438c-4a64-b679-ae501e7d6091",
-        output_format={"container": "wav", "sample_rate": 8000, "encoding": "pcm_mulaw"},
+async def text_to_speech_for_browser(
+    text: str,
+    model: str | None = None,
+) -> bytes:
+    """Generate WAV audio for browser playback."""
+    return await _sarvam_tts(
+        text=text,
+        speech_sample_rate=24000,
+        audio_format="wav",
     )
-    return output
-"""

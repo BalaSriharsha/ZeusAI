@@ -3,8 +3,7 @@ AI Phone Agent -- Main Application
 
 FastAPI server that orchestrates:
   - Browser WebSocket (user <-> system)
-  - Twilio phone calls (to the real target number) with Media Streams
-  - Simulated calls via hospital agent WebSocket (fallback when no target number)
+  - Exotel phone calls (to the real target number) via Voice Streaming
   - Agent pipeline (transcription -> classification -> action)
 """
 
@@ -18,8 +17,9 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Dict
 
-import websockets
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+import httpx
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,9 +29,9 @@ from backend.agents import InputAgent, CallMonitorAgent, ActionAgent
 from backend.models.schemas import (
     CallState, CallStatus, ActionType,
 )
-from backend.services import tts_service, groq_stt
+from backend.services import tts_service, sarvam_stt
 from backend.services.audio_utils import (
-    receive_speech, mulaw_to_wav,
+    receive_speech, pcm16_to_wav, mulaw_to_pcm_bytes,
 )
 
 # ------------------------------------------------
@@ -56,8 +56,19 @@ twilio_streams: Dict[str, WebSocket] = {}
 twilio_stream_sids: Dict[str, str] = {}
 twilio_call_sids: Dict[str, str] = {}
 
-# Audio queues for real-call mode (stream handler -> call loop)
+# Exotel Voice Stream state
+exotel_streams: Dict[str, WebSocket] = {}
+exotel_stream_sids: Dict[str, str] = {}
+exotel_call_sids: Dict[str, str] = {}
+# Mapping from Exotel call_sid -> internal call_id (for stream correlation)
+exotel_sid_to_call_id: Dict[str, str] = {}
+
+# Audio queues for real-call mode (stream handler -> conversation loop)
+# Queue always contains slin16 PCM bytes regardless of provider
 audio_queues: Dict[str, asyncio.Queue] = {}
+
+# Exotel API base URL (Mumbai cluster for India)
+_EXOTEL_BASE_URL = "https://api.in.exotel.com/v1/Accounts"
 
 # ------------------------------------------------
 # Twilio Client
@@ -78,12 +89,15 @@ def _get_twilio_client():
 
 
 def _sanitize_phone(number: str) -> str:
-    """Clean a phone number to E.164 format."""
+    """
+    Clean a phone number to E.164 format (+91XXXXXXXXXX for Indian numbers).
+    """
     cleaned = re.sub(r'[^\d+]', '', number)
+
     if not cleaned.startswith('+'):
         if len(cleaned) == 10:
             cleaned = '+91' + cleaned
-        elif len(cleaned) == 11 and cleaned.startswith('1'):
+        elif len(cleaned) == 12 and cleaned.startswith('91'):
             cleaned = '+' + cleaned
         else:
             cleaned = '+' + cleaned
@@ -98,11 +112,14 @@ def _sanitize_phone(number: str) -> str:
 async def lifespan(app: FastAPI):
     logger.info("AI Phone Agent starting up...")
     logger.info(f"   Groq LLM:       {settings.groq_llm_model}")
-    logger.info(f"   Groq STT:       {settings.groq_stt_model}")
-    logger.info(f"   Agent voice:    {settings.agent_tts_voice}")
-    logger.info(f"   Hospital sim:   {settings.hospital_agent_url}")
-    logger.info(f"   Twilio number:  {settings.twilio_phone_number}")
+    logger.info(f"   Sarvam STT:     {settings.sarvam_stt_model}")
+    logger.info(f"   Sarvam TTS:     {settings.sarvam_tts_speaker} / {settings.sarvam_tts_language}")
+    logger.info(f"   Twilio number:  {settings.twilio_phone_number or '(not set)'}")
+    logger.info(f"   Exotel number:  {settings.exotel_phone_number or '(not set)'}")
+    logger.info(f"   Exotel app:     {settings.exotel_app_id or '(not set)'}")
     logger.info(f"   Public URL:     {settings.public_base_url}")
+    logger.info(f"   Exotel stream:  {settings.public_base_url}/exotel/stream")
+    logger.info(f"   Twilio stream:  {settings.public_base_url}/twilio/stream/<call_id>")
     yield
     for task in call_tasks.values():
         task.cancel()
@@ -118,7 +135,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -241,17 +258,20 @@ async def _handle_user_input(
             })
             return
 
-        # Tell browser the call mode
         target = intent.target_entity or "target"
-        if intent.target_phone:
-            mode_msg = f"Will call {target} at {intent.target_phone} via Twilio."
-        else:
-            mode_msg = f"No phone number found for {target}. Will use simulated agent."
+        if not intent.target_phone:
+            await _send_to_browser(ws, "error", {
+                "message": (
+                    f"No phone number found for \"{target}\". "
+                    "Add the number to PHONE_REGISTRY in your .env, "
+                    "or include the phone number directly in your request."
+                ),
+            })
+            return
 
         await _send_to_browser(ws, "ready_for_call", {
             "call_id": call_id,
-            "message": f"Intent extracted. {mode_msg} Click Start Call.",
-            "call_mode": "real" if intent.target_phone else "simulated",
+            "message": f"Ready to call {target} at {intent.target_phone}. Click Start Call.",
             "target_entity": intent.target_entity,
             "target_phone": intent.target_phone,
         })
@@ -272,20 +292,8 @@ async def _send_to_browser(ws: WebSocket, msg_type: str, data: dict):
 # Twilio -- Create / End Call
 # ------------------------------------------------
 
-async def _create_twilio_call(
-    call_id: str,
-    to_phone: str,
-    play_intro: bool = False,
-) -> str:
-    """
-    Create a Twilio outbound call with a bidirectional Media Stream.
-
-    Args:
-        call_id: Internal session ID
-        to_phone: E.164 phone number to call
-        play_intro: If True, play an intro message before connecting stream
-                    (for listener calls). False for real target calls.
-    """
+async def _create_twilio_call(call_id: str, to_phone: str) -> str:
+    """Create a Twilio outbound call with a bidirectional Media Stream."""
     loop = asyncio.get_event_loop()
 
     from_phone = _sanitize_phone(settings.twilio_phone_number)
@@ -296,29 +304,13 @@ async def _create_twilio_call(
     host = base.replace("https://", "").replace("http://", "")
     stream_url = f"{ws_scheme}://{host}/twilio/stream/{call_id}"
 
-    if play_intro:
-        twiml_str = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<Response>'
-            '<Say voice="Polly.Amy">'
-            'Connecting to the AI phone agent. Please listen.'
-            '</Say>'
-            f'<Connect><Stream url="{stream_url}" /></Connect>'
-            '</Response>'
-        )
-    else:
-        # Real target call: add a brief greeting so the person knows
-        # someone is on the line, then start the bidirectional stream.
-        twiml_str = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<Response>'
-            '<Say voice="Polly.Amy">'
-            'Hello, please hold while we connect you to our assistant.'
-            '</Say>'
-            '<Pause length="1"/>'
-            f'<Connect><Stream url="{stream_url}" /></Connect>'
-            '</Response>'
-        )
+    twiml_str = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Response>'
+        '<Pause length="1"/>'
+        f'<Connect><Stream url="{stream_url}" /></Connect>'
+        '</Response>'
+    )
 
     logger.info(
         f"[Twilio] Creating call: {from_phone} -> {to_phone_clean}, "
@@ -334,7 +326,9 @@ async def _create_twilio_call(
         )
         return call.sid
 
-    return await loop.run_in_executor(None, _create)
+    sid = await loop.run_in_executor(None, _create)
+    twilio_call_sids[call_id] = sid
+    return sid
 
 
 async def _end_twilio_call(call_sid: str):
@@ -352,7 +346,157 @@ async def _end_twilio_call(call_sid: str):
 
 
 # ------------------------------------------------
-# Twilio -- SMS Summary
+# Twilio -- Media Stream WebSocket
+# ------------------------------------------------
+
+@app.websocket("/twilio/stream/{call_id}")
+async def twilio_media_stream(ws: WebSocket, call_id: str):
+    await ws.accept()
+    logger.info(f"[Twilio] Media Stream connected for call {call_id}")
+
+    stream_sid = None
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            event = msg.get("event")
+
+            if event == "connected":
+                logger.info(f"[Twilio] Stream protocol connected: {call_id}")
+
+            elif event == "start":
+                stream_sid = msg.get("streamSid", "")
+                twilio_streams[call_id] = ws
+                twilio_stream_sids[call_id] = stream_sid
+                logger.info(f"[Twilio] Stream started: {stream_sid}")
+
+            elif event == "media":
+                queue = audio_queues.get(call_id)
+                if queue:
+                    payload = msg.get("media", {}).get("payload", "")
+                    if payload:
+                        # Normalize mulaw -> slin16 PCM before queuing
+                        mulaw = base64.b64decode(payload)
+                        pcm = mulaw_to_pcm_bytes(mulaw)
+                        await queue.put(pcm)
+
+            elif event == "stop":
+                logger.info(f"[Twilio] Stream stopped: {stream_sid}")
+                break
+
+    except WebSocketDisconnect:
+        logger.info(f"[Twilio] Stream disconnected: {call_id}")
+    except Exception as e:
+        logger.error(f"[Twilio] Stream error: {e}")
+    finally:
+        twilio_streams.pop(call_id, None)
+        twilio_stream_sids.pop(call_id, None)
+        queue = audio_queues.get(call_id)
+        if queue:
+            await queue.put(None)  # sentinel value
+
+
+async def _send_audio_to_twilio(call_id: str, mulaw_bytes: bytes):
+    ws = twilio_streams.get(call_id)
+    stream_sid = twilio_stream_sids.get(call_id)
+    if not ws or not stream_sid:
+        return
+
+    try:
+        await ws.send_text(json.dumps({
+            "event": "clear",
+            "streamSid": stream_sid,
+        }))
+    except Exception:
+        return
+
+    CHUNK_SIZE = 640
+    for i in range(0, len(mulaw_bytes), CHUNK_SIZE):
+        chunk = mulaw_bytes[i:i + CHUNK_SIZE]
+        payload = base64.b64encode(chunk).decode()
+        try:
+            await ws.send_text(json.dumps({
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {"payload": payload},
+            }))
+        except Exception:
+            break
+
+    # mulaw at 8kHz: 8000 bytes/sec
+    duration = len(mulaw_bytes) / 8000.0
+    await asyncio.sleep(duration + 0.3)
+
+
+# ------------------------------------------------
+# Exotel -- Create / End Call
+# ------------------------------------------------
+
+async def _create_exotel_call(call_id: str, to_phone: str) -> str:
+    """
+    Initiate an Exotel outbound call to `to_phone`.
+
+    Exotel calls the target number, and when answered, executes the App Bazaar
+    flow (EXOTEL_APP_ID) which contains a Voicebot Applet pointing at our
+    /exotel/stream WebSocket endpoint.
+
+    Returns the Exotel call SID and stores it in `exotel_sid_to_call_id`
+    so the stream handler can correlate the incoming WebSocket with this call.
+    """
+    url = f"{_EXOTEL_BASE_URL}/{settings.exotel_account_sid}/Calls/connect"
+    to_phone_clean = _sanitize_phone(to_phone)
+    caller_id = _sanitize_phone(settings.exotel_phone_number)
+    app_url = (
+        f"http://my.exotel.com/{settings.exotel_account_sid}"
+        f"/exoml/start_voice/{settings.exotel_app_id}"
+    )
+
+    logger.info(
+        f"[Exotel] Creating call: {caller_id} -> {to_phone_clean}, "
+        f"app_id: {settings.exotel_app_id}"
+    )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            url,
+            auth=(settings.exotel_api_key, settings.exotel_api_token),
+            data={
+                "From": to_phone_clean,
+                "CallerId": caller_id,
+                "Url": app_url,
+            },
+        )
+        response.raise_for_status()
+        result = response.json()
+
+    call_sid = result["Call"]["Sid"]
+    exotel_sid_to_call_id[call_sid] = call_id
+    exotel_call_sids[call_id] = call_sid
+    logger.info(f"[Exotel] Call created: SID={call_sid}")
+    return call_sid
+
+
+async def _end_exotel_call(call_sid: str):
+    """Hang up an active Exotel call."""
+    url = (
+        f"{_EXOTEL_BASE_URL}/{settings.exotel_account_sid}"
+        f"/Calls/{call_sid}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            await client.post(
+                url,
+                auth=(settings.exotel_api_key, settings.exotel_api_token),
+                data={"Status": "completed"},
+            )
+        logger.info(f"[Exotel] Call {call_sid} ended")
+    except Exception as e:
+        logger.warning(f"[Exotel] Failed to end call {call_sid}: {e}")
+
+
+# ------------------------------------------------
+# SMS Summary (dispatches by provider)
 # ------------------------------------------------
 
 async def _send_sms_summary(
@@ -360,11 +504,9 @@ async def _send_sms_summary(
     intent,
     turn_count: int,
     conversation_log: list[dict],
-    twilio_sid: str | None = None,
+    provider: str = "exotel",
+    call_sid: str | None = None,
 ):
-    loop = asyncio.get_event_loop()
-
-    from_phone = _sanitize_phone(settings.twilio_phone_number)
     to_phone_clean = _sanitize_phone(to_phone)
 
     lines = ["AI Phone Agent - Call Summary", ""]
@@ -401,39 +543,76 @@ async def _send_sms_summary(
             lines.append("")
             lines.append(f"Last response: \"{last_other}\"")
 
-    if twilio_sid:
+    if call_sid:
         lines.append("")
-        lines.append(f"Call SID: {twilio_sid}")
+        lines.append(f"Call SID: {call_sid}")
 
     body = "\n".join(lines)
 
-    def _send():
-        client = _get_twilio_client()
-        message = client.messages.create(
-            to=to_phone_clean,
-            from_=from_phone,
-            body=body,
-        )
-        return message.sid
+    if provider == "twilio":
+        from_phone = _sanitize_phone(settings.twilio_phone_number)
+        loop = asyncio.get_event_loop()
 
-    try:
-        msg_sid = await loop.run_in_executor(None, _send)
-        logger.info(f"[Twilio] SMS sent to {to_phone_clean}: {msg_sid}")
-        return msg_sid
-    except Exception as e:
-        logger.error(f"[Twilio] SMS failed to {to_phone_clean}: {e}")
-        return None
+        def _send_twilio():
+            client = _get_twilio_client()
+            msg = client.messages.create(
+                to=to_phone_clean,
+                from_=from_phone,
+                body=body,
+            )
+            return msg.sid
+
+        try:
+            msg_sid = await loop.run_in_executor(None, _send_twilio)
+            logger.info(f"[Twilio] SMS sent to {to_phone_clean}: {msg_sid}")
+            return msg_sid
+        except Exception as e:
+            logger.error(f"[Twilio] SMS failed to {to_phone_clean}: {e}")
+            return None
+    else:
+        from_phone = _sanitize_phone(settings.exotel_phone_number)
+        url = f"{_EXOTEL_BASE_URL}/{settings.exotel_account_sid}/Sms/send"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    url,
+                    auth=(settings.exotel_api_key, settings.exotel_api_token),
+                    data={
+                        "From": from_phone,
+                        "To": to_phone_clean,
+                        "Body": body,
+                        "SmsType": "transactional",
+                    },
+                )
+                response.raise_for_status()
+                result = response.json()
+            msg_sid = result.get("SMSMessage", {}).get("Sid", "")
+            logger.info(f"[Exotel] SMS sent to {to_phone_clean}: {msg_sid}")
+            return msg_sid
+        except Exception as e:
+            logger.error(f"[Exotel] SMS failed to {to_phone_clean}: {e}")
+            return None
 
 
 # ------------------------------------------------
-# Twilio -- Media Stream WebSocket
+# Exotel -- Voice Stream WebSocket
 # ------------------------------------------------
 
-@app.websocket("/twilio/stream/{call_id}")
-async def twilio_media_stream(ws: WebSocket, call_id: str):
+@app.websocket("/exotel/stream")
+async def exotel_stream(ws: WebSocket):
+    """
+    Bidirectional WebSocket endpoint for Exotel Voice Streaming.
+
+    Configured as the Voicebot Applet URL in the Exotel App Bazaar dashboard.
+    Exotel connects here when a call is answered. The `start` message contains
+    the call_sid which we use to correlate with our internal call_id.
+
+    Audio format: raw slin16 PCM (16-bit, 8kHz, mono, little-endian), base64 encoded.
+    """
     await ws.accept()
-    logger.info(f"[Twilio] Media Stream connected for call {call_id}")
+    logger.info("[Exotel] Voice Stream WebSocket connected")
 
+    call_id = None
     stream_sid = None
 
     try:
@@ -443,69 +622,149 @@ async def twilio_media_stream(ws: WebSocket, call_id: str):
             event = msg.get("event")
 
             if event == "connected":
-                logger.info(f"[Twilio] Stream protocol connected: {call_id}")
+                logger.info("[Exotel] Stream protocol handshake complete")
 
             elif event == "start":
-                stream_sid = msg.get("streamSid", "")
-                twilio_streams[call_id] = ws
-                twilio_stream_sids[call_id] = stream_sid
-                logger.info(f"[Twilio] Stream started: {stream_sid}")
+                start_data = msg.get("start", {})
+                stream_sid = start_data.get("stream_sid") or msg.get("stream_sid", "")
+                call_sid = start_data.get("call_sid", "")
+                from_number = start_data.get("from", "")
+                to_number = start_data.get("to", "")
+
+                logger.info(
+                    f"[Exotel] Stream started: stream_sid={stream_sid}, "
+                    f"call_sid={call_sid}, {from_number} -> {to_number}"
+                )
+
+                # Wait briefly for the API response to populate the mapping
+                # (API call → call_sid stored → WebSocket start event)
+                for _ in range(50):
+                    call_id = exotel_sid_to_call_id.get(call_sid)
+                    if call_id:
+                        break
+                    await asyncio.sleep(0.1)
+
+                if call_id:
+                    exotel_streams[call_id] = ws
+                    exotel_stream_sids[call_id] = stream_sid
+                    logger.info(f"[Exotel] Stream correlated to call {call_id}")
+                else:
+                    logger.warning(
+                        f"[Exotel] Could not correlate stream for "
+                        f"call_sid={call_sid}. Known SIDs: "
+                        f"{list(exotel_sid_to_call_id.keys())}"
+                    )
 
             elif event == "media":
-                # Forward inbound audio to the audio queue (for real-call STT)
-                queue = audio_queues.get(call_id)
-                if queue:
-                    payload = msg.get("media", {}).get("payload", "")
-                    if payload:
-                        chunk = base64.b64decode(payload)
-                        await queue.put(chunk)
+                if call_id:
+                    queue = audio_queues.get(call_id)
+                    if queue:
+                        payload = msg.get("media", {}).get("payload", "")
+                        if payload:
+                            chunk = base64.b64decode(payload)
+                            await queue.put(chunk)
 
             elif event == "stop":
-                logger.info(f"[Twilio] Stream stopped: {stream_sid}")
+                logger.info(f"[Exotel] Stream stopped: stream_sid={stream_sid}")
                 break
 
     except WebSocketDisconnect:
-        logger.info(f"[Twilio] Stream disconnected: {call_id}")
+        logger.info(f"[Exotel] Stream WebSocket disconnected: stream_sid={stream_sid}")
     except Exception as e:
-        logger.error(f"[Twilio] Stream error: {e}")
+        logger.error(f"[Exotel] Stream error: {e}")
     finally:
-        twilio_streams.pop(call_id, None)
-        twilio_stream_sids.pop(call_id, None)
+        if call_id:
+            exotel_streams.pop(call_id, None)
+            exotel_stream_sids.pop(call_id, None)
         # Signal the conversation loop that the stream is gone
-        queue = audio_queues.get(call_id)
-        if queue:
-            await queue.put(None)  # sentinel value
+        if call_id:
+            queue = audio_queues.get(call_id)
+            if queue:
+                await queue.put(None)  # sentinel value
 
 
-async def _send_audio_to_twilio(call_id: str, mulaw_bytes: bytes):
-    ws = twilio_streams.get(call_id)
-    stream_sid = twilio_stream_sids.get(call_id)
+async def _send_audio_to_exotel(call_id: str, pcm_bytes: bytes):
+    """
+    Send linear16 PCM audio to the Exotel stream for the given call.
+
+    Sends a `clear` event first (to cancel any pending audio), then streams
+    the PCM in 3200-byte chunks (each a multiple of 320 bytes as required).
+    """
+    ws = exotel_streams.get(call_id)
+    stream_sid = exotel_stream_sids.get(call_id)
     if not ws or not stream_sid:
         return
 
     try:
         await ws.send_text(json.dumps({
             "event": "clear",
-            "streamSid": stream_sid,
+            "stream_sid": stream_sid,
         }))
     except Exception:
         return
 
-    CHUNK_SIZE = 640
-    for i in range(0, len(mulaw_bytes), CHUNK_SIZE):
-        chunk = mulaw_bytes[i:i + CHUNK_SIZE]
+    # 3200 bytes = 200ms at 8kHz 16-bit; within Exotel's valid chunk range
+    CHUNK_SIZE = 3200
+    for i in range(0, len(pcm_bytes), CHUNK_SIZE):
+        chunk = pcm_bytes[i:i + CHUNK_SIZE]
+        # Pad to nearest multiple of 320 bytes
+        remainder = len(chunk) % 320
+        if remainder:
+            chunk = chunk + b'\x00' * (320 - remainder)
         payload = base64.b64encode(chunk).decode()
         try:
             await ws.send_text(json.dumps({
                 "event": "media",
-                "streamSid": stream_sid,
+                "stream_sid": stream_sid,
                 "media": {"payload": payload},
             }))
         except Exception:
             break
 
-    duration = len(mulaw_bytes) / 8000.0
+    # Wait for audio playback to finish (8kHz, 16-bit = 16000 bytes/sec)
+    duration = len(pcm_bytes) / 16000.0
     await asyncio.sleep(duration + 0.3)
+
+
+# ------------------------------------------------
+# Provider-Dispatch Helpers
+# ------------------------------------------------
+
+async def _create_call(call_id: str, to_phone: str, provider: str) -> str:
+    """Create an outbound call via the chosen provider. Returns call SID."""
+    if provider == "twilio":
+        return await _create_twilio_call(call_id, to_phone)
+    return await _create_exotel_call(call_id, to_phone)
+
+
+async def _end_call(call_sid: str, provider: str):
+    """Hang up an active call via the chosen provider."""
+    if provider == "twilio":
+        await _end_twilio_call(call_sid)
+    else:
+        await _end_exotel_call(call_sid)
+
+
+def _stream_connected(call_id: str, provider: str) -> bool:
+    """Check whether the audio stream WebSocket is open for this call."""
+    if provider == "twilio":
+        return call_id in twilio_streams
+    return call_id in exotel_streams
+
+
+async def _tts_for_stream(text: str, provider: str) -> bytes:
+    """Generate TTS audio in the format expected by the chosen provider."""
+    if provider == "twilio":
+        return await tts_service.text_to_speech_for_twilio(text)
+    return await tts_service.text_to_speech_for_call(text)
+
+
+async def _send_audio_stream(call_id: str, audio_bytes: bytes, provider: str):
+    """Send TTS audio to the phone stream for the chosen provider."""
+    if provider == "twilio":
+        await _send_audio_to_twilio(call_id, audio_bytes)
+    else:
+        await _send_audio_to_exotel(call_id, audio_bytes)
 
 
 # ------------------------------------------------
@@ -513,7 +772,7 @@ async def _send_audio_to_twilio(call_id: str, mulaw_bytes: bytes):
 # ------------------------------------------------
 
 @app.post("/api/start-call/{call_id}")
-async def start_call(call_id: str, mode: str = Query("conversational")):
+async def start_call(call_id: str, provider: str = "exotel"):
     if call_id not in active_calls:
         return JSONResponse(status_code=404, content={"error": "No active session."})
 
@@ -528,220 +787,141 @@ async def start_call(call_id: str, mode: str = Query("conversational")):
     if call_id in call_tasks:
         return JSONResponse(status_code=400, content={"error": "Call already in progress."})
 
-    task = asyncio.create_task(_run_call(call_id, mode, call_state, browser_ws))
+    if provider not in ("twilio", "exotel"):
+        return JSONResponse(status_code=400, content={"error": "Unknown provider."})
+
+    task = asyncio.create_task(_run_call(call_id, call_state, browser_ws, provider))
     call_tasks[call_id] = task
 
-    return JSONResponse(content={"status": "ok", "message": "Call started."})
+    return JSONResponse(content={"status": "ok", "message": "Call started.", "provider": provider})
 
 
 async def _run_call(
     call_id: str,
-    mode: str,
     call_state: CallState,
     browser_ws: WebSocket,
+    provider: str = "exotel",
 ):
-    """Dispatch to real-call or simulated-call based on target_phone."""
     intent = call_state.user_intent
     target_phone = intent.target_phone
-
-    if target_phone and settings.twilio_account_sid and settings.twilio_auth_token:
-        await _run_call_real(call_id, mode, call_state, browser_ws, target_phone)
+    if target_phone:
+        await _run_call_real(call_id, call_state, browser_ws, target_phone, provider)
     else:
-        await _run_call_simulated(call_id, mode, call_state, browser_ws)
+        await _send_to_browser(browser_ws, "error", {
+            "message": "No target phone number — cannot place call.",
+        })
 
-
-def _build_agent_intro(intent) -> str:
-    """
-    Build a natural opening line for the AI agent when it starts a real call.
-    The agent should introduce itself clearly so the other party knows who
-    is calling and why.
-    """
-    user_name = intent.user_name or "a patient"
-    target = intent.target_entity or "your organization"
-    task = intent.task_description or ""
-
-    # Build a contextual introduction
-    parts = [f"Hello, I am an AI assistant calling on behalf of {user_name}."]
-
-    if task:
-        parts.append(f"I am calling to {task.lower().rstrip('.')}.")
-    elif intent.intent.value == "book_appointment":
-        doctor_info = ""
-        if intent.doctor_name:
-            doctor_info = f" with Dr. {intent.doctor_name}"
-        elif intent.doctor_specialty:
-            doctor_info = f" with a {intent.doctor_specialty}"
-        date_info = ""
-        if intent.appointment_date:
-            date_info = f" on {intent.appointment_date}"
-        parts.append(
-            f"I would like to book an appointment{doctor_info}{date_info}."
-        )
-    else:
-        parts.append(f"I need some assistance from {target}.")
-
-    parts.append("Could you please help me with this?")
-
-    return " ".join(parts)
 
 
 # ------------------------------------------------
-# Real Call Mode -- Twilio call to actual target
+# Real Call Mode
 # ------------------------------------------------
 
 async def _run_call_real(
     call_id: str,
-    mode: str,
     call_state: CallState,
     browser_ws: WebSocket,
     target_phone: str,
+    provider: str = "exotel",
 ):
     """
-    Call the actual target via Twilio. The conversation is driven by:
-      - Incoming audio from the target (via Media Stream -> STT)
-      - Our agent decides a response (via LLM)
-      - Outgoing audio sent back (via TTS -> Media Stream)
+    Call the target via the chosen provider (Twilio or Exotel).
+    The conversation loop is identical for both — only stream setup and
+    audio formatting differ, handled by the dispatch helpers.
     """
-    twilio_sid = None
+    provider_label = provider.capitalize()
+    call_sid = None
     conversation_log = []
     try:
         intent = call_state.user_intent
         action_agent = ActionAgent(call_state)
         target_label = intent.target_entity or target_phone
 
-        # -- Create audio queue for incoming audio --
         queue = asyncio.Queue()
         audio_queues[call_id] = queue
 
-        # -- Create Twilio call to target --
         await _send_to_browser(browser_ws, "call_status", {
             "status": "calling",
-            "message": f"Dialing {target_label} ({target_phone}) via Twilio...",
+            "message": f"Dialing {target_label} ({target_phone}) via {provider_label}...",
+            "provider": provider,
         })
 
-        twilio_sid = await _create_twilio_call(
-            call_id, target_phone, play_intro=False,
-        )
-        twilio_call_sids[call_id] = twilio_sid
+        call_sid = await _create_call(call_id, target_phone, provider)
 
         await _send_to_browser(browser_ws, "call_status", {
             "status": "ringing",
-            "message": f"Ringing {target_label}... (SID: {twilio_sid})",
-            "twilio_sid": twilio_sid,
+            "message": f"Ringing {target_label}... (SID: {call_sid})",
+            "provider_sid": call_sid,
+            "provider": provider,
         })
 
-        # Wait for stream to connect (generous timeout for trial accounts)
+        # Wait for the stream WebSocket to connect
         STREAM_WAIT_SECS = 90
         for _ in range(STREAM_WAIT_SECS):
-            if call_id in twilio_streams:
+            if _stream_connected(call_id, provider):
                 break
             await asyncio.sleep(1)
 
-        if call_id not in twilio_streams:
+        if not _stream_connected(call_id, provider):
+            stream_url = (
+                f"{settings.public_base_url}/twilio/stream/{call_id}"
+                if provider == "twilio"
+                else f"{settings.public_base_url}/exotel/stream"
+            )
             await _send_to_browser(browser_ws, "error", {
                 "message": (
-                    f"Call to {target_label} failed -- no stream connection "
-                    f"after {STREAM_WAIT_SECS}s. Make sure the other party "
-                    f"answered and pressed a key (trial accounts require this)."
+                    f"Call to {target_label} failed -- {provider_label} did not connect "
+                    f"the audio stream after {STREAM_WAIT_SECS}s. "
+                    f"Check that PUBLIC_BASE_URL is publicly reachable "
+                    f"(current: {settings.public_base_url}). "
+                    f"Expected stream URL: {stream_url}"
                 ),
             })
             return
 
-        logger.info(f"[Call-Real] Stream connected for {target_label}")
-
-        await _send_to_browser(browser_ws, "call_status", {
-            "status": "phone_connected",
-            "message": f"Connected to {target_label}. Starting conversation...",
-        })
-
-        turn_count = 0
-        MAX_SILENT_ROUNDS = 3  # allow this many consecutive silent rounds
-        silent_rounds = 0
-
-        # -- Agent speaks FIRST (introduce itself) --
-        intro_text = _build_agent_intro(intent)
-        logger.info(f"[Call-Real] Agent intro: {intro_text}")
-
-        turn_count += 1
-        conversation_log.append({"speaker": "agent", "text": intro_text})
-
-        intro_audio_b64 = ""
-        try:
-            mulaw_intro = await tts_service.text_to_speech_for_twilio(
-                intro_text, model=settings.agent_tts_voice,
-            )
-            await _send_audio_to_twilio(call_id, mulaw_intro)
-        except Exception as e:
-            logger.error(f"[Call-Real] Agent intro TTS (Twilio) failed: {e}")
-
-        try:
-            mp3_intro = await tts_service.text_to_speech_mp3(
-                intro_text, model=settings.agent_tts_voice,
-            )
-            intro_audio_b64 = base64.b64encode(mp3_intro).decode()
-        except Exception as e:
-            logger.error(f"[Call-Real] Agent intro TTS (browser) failed: {e}")
-
-        await _send_to_browser(browser_ws, "call_turn", {
-            "speaker": "agent",
-            "text": intro_text,
-            "audio_b64": intro_audio_b64,
-            "turn": turn_count,
-            "action_type": "speak",
-        })
+        logger.info(f"[Call] {provider_label} stream connected for {target_label}")
 
         await _send_to_browser(browser_ws, "call_status", {
             "status": "in_call",
-            "message": f"In conversation with {target_label}...",
+            "message": f"Connected to {target_label}. Waiting for them to speak...",
         })
 
-        # -- Conversation loop --
+        turn_count = 0
+        MAX_SILENT_ROUNDS = 3
+        silent_rounds = 0
+
         while True:
-            # -- Listen: receive speech from the target --
             await _send_to_browser(browser_ws, "agent_update", {
                 "agent": 2,
                 "text": "Listening...",
                 "active": True,
             })
 
-            speech_mulaw = await receive_speech(queue, timeout=45.0)
+            speech_pcm = await receive_speech(queue, timeout=45.0)
 
-            if not speech_mulaw:
+            if not speech_pcm:
                 silent_rounds += 1
                 logger.info(
-                    f"[Call-Real] No speech detected "
+                    f"[Call] No speech detected "
                     f"(round {silent_rounds}/{MAX_SILENT_ROUNDS})"
                 )
-
                 if silent_rounds >= MAX_SILENT_ROUNDS:
-                    logger.info("[Call-Real] Max silent rounds reached, ending.")
+                    logger.info("[Call] Max silent rounds reached, ending.")
                     break
 
-                # Prompt the other party again
-                nudge = (
-                    "Hello? Are you still there? "
-                    "I am an AI assistant calling on behalf of a patient. "
-                    "Could you please respond?"
-                )
+                nudge = "Hello? Are you still there?"
                 turn_count += 1
                 conversation_log.append({"speaker": "agent", "text": nudge})
-
                 try:
-                    mulaw_nudge = await tts_service.text_to_speech_for_twilio(
-                        nudge, model=settings.agent_tts_voice,
-                    )
-                    await _send_audio_to_twilio(call_id, mulaw_nudge)
+                    stream_audio = await _tts_for_stream(nudge, provider)
+                    await _send_audio_stream(call_id, stream_audio, provider)
                 except Exception as e:
-                    logger.error(f"[Call-Real] Nudge TTS failed: {e}")
-
+                    logger.error(f"[Call] Nudge TTS failed: {e}")
                 try:
-                    mp3_nudge = await tts_service.text_to_speech_mp3(
-                        nudge, model=settings.agent_tts_voice,
-                    )
+                    mp3_nudge = await tts_service.text_to_speech_mp3(nudge)
                     nudge_b64 = base64.b64encode(mp3_nudge).decode()
                 except Exception:
                     nudge_b64 = ""
-
                 await _send_to_browser(browser_ws, "call_turn", {
                     "speaker": "agent",
                     "text": nudge,
@@ -751,93 +931,65 @@ async def _run_call_real(
                 })
                 continue
 
-            # Reset silence counter when we do get speech
             silent_rounds = 0
 
-            # -- Transcribe --
-            wav_bytes = mulaw_to_wav(speech_mulaw)
-            transcript = await groq_stt.transcribe_audio(
-                wav_bytes,
-                prompt=f"Phone call with {target_label}.",
-            )
+            # Transcribe
+            wav_bytes = pcm16_to_wav(speech_pcm)
+            transcript = await sarvam_stt.transcribe_audio(wav_bytes)
 
             if not transcript or len(transcript.strip()) < 2:
-                logger.info("[Call-Real] Empty transcript, continuing...")
+                logger.info("[Call] Empty transcript, continuing...")
                 continue
 
             turn_count += 1
-            conversation_log.append({
-                "speaker": "other_party",
-                "text": transcript,
-            })
+            conversation_log.append({"speaker": "other_party", "text": transcript})
+            logger.info(f"[Call] Other party: {transcript[:80]}")
 
-            logger.info(f"[Call-Real] Other party: {transcript[:80]}")
-
-            # Forward to browser (no TTS audio for the other party since
-            # we heard them live through the stream)
             await _send_to_browser(browser_ws, "call_turn", {
                 "speaker": "hospital",
                 "text": transcript,
                 "audio_b64": "",
                 "turn": turn_count,
             })
-
             await _send_to_browser(browser_ws, "agent_update", {
                 "agent": 2,
                 "text": f"Heard: \"{transcript[:60]}\"",
                 "active": True,
             })
 
-            # -- Agent decides action --
             agent_action = await action_agent.handle_raw_transcript(transcript)
-
             await _send_to_browser(browser_ws, "agent_update", {
                 "agent": 3,
                 "text": f"Action: {agent_action.action_type.value}",
                 "active": True,
             })
 
-            # -- Build response --
             display_text = ""
             agent_audio_b64 = ""
 
             if agent_action.action_type in (ActionType.SPEAK, ActionType.END_CALL):
                 display_text = agent_action.speech_text or ""
                 if display_text:
-                    # Generate mulaw for Twilio and mp3 for browser
                     try:
-                        mulaw = await tts_service.text_to_speech_for_twilio(
-                            display_text, model=settings.agent_tts_voice,
-                        )
-                        await _send_audio_to_twilio(call_id, mulaw)
+                        stream_audio = await _tts_for_stream(display_text, provider)
+                        await _send_audio_stream(call_id, stream_audio, provider)
                     except Exception as e:
-                        logger.error(f"[Call-Real] Agent Twilio TTS failed: {e}")
-
+                        logger.error(f"[Call] Agent stream TTS failed: {e}")
                     try:
-                        mp3 = await tts_service.text_to_speech_mp3(
-                            display_text, model=settings.agent_tts_voice,
-                        )
+                        mp3 = await tts_service.text_to_speech_mp3(display_text)
                         agent_audio_b64 = base64.b64encode(mp3).decode()
                     except Exception as e:
-                        logger.error(f"[Call-Real] Agent browser TTS failed: {e}")
+                        logger.error(f"[Call] Agent browser TTS failed: {e}")
 
             elif agent_action.action_type == ActionType.DTMF:
                 display_text = f"[Pressed {agent_action.dtmf_digits}]"
-                logger.info(
-                    f"[Call-Real] DTMF not yet supported in real calls: "
-                    f"{agent_action.dtmf_digits}"
-                )
+                logger.info(f"[Call] DTMF action (agent should speak instead): {agent_action.dtmf_digits}")
 
             elif agent_action.action_type == ActionType.WAIT:
                 display_text = f"[Waiting: {agent_action.reasoning}]"
 
             turn_count += 1
-            conversation_log.append({
-                "speaker": "agent",
-                "text": display_text,
-            })
-
-            # Forward to browser
+            conversation_log.append({"speaker": "agent", "text": display_text})
             await _send_to_browser(browser_ws, "call_turn", {
                 "speaker": "agent",
                 "text": display_text,
@@ -851,21 +1003,20 @@ async def _run_call_real(
             if agent_action.action_type == ActionType.END_CALL:
                 break
 
-        # -- Call completed --
         call_state.status = CallStatus.COMPLETED
         await _send_to_browser(browser_ws, "call_complete", {
             "total_turns": turn_count,
-            "message": f"Call to {target_label} completed.",
+            "message": f"Call to {target_label} completed. ({turn_count} turns)",
         })
 
-        # -- SMS summary --
         sms_phone = intent.user_phone or settings.default_user_phone
         sms_sid = await _send_sms_summary(
             to_phone=sms_phone,
             intent=intent,
             turn_count=turn_count,
             conversation_log=conversation_log,
-            twilio_sid=twilio_sid,
+            provider=provider,
+            call_sid=call_sid,
         )
         if sms_sid:
             await _send_to_browser(browser_ws, "call_status", {
@@ -874,308 +1025,54 @@ async def _run_call_real(
             })
 
     except Exception as e:
-        logger.error(f"[Call-Real] Error: {e}")
-        await _send_to_browser(browser_ws, "error", {
-            "message": f"Call error: {str(e)}",
-        })
+        err_str = str(e)
+        logger.error(f"[Call] Error ({provider}): {err_str}")
+
+        if provider == "twilio":
+            if "not allowed to call" in err_str or "21215" in err_str:
+                user_msg = (
+                    f"Twilio blocked the call to {target_phone}. "
+                    "Go to console.twilio.com > Voice > Settings > Geo Permissions "
+                    "and enable India. Save and retry."
+                )
+            elif "21219" in err_str or "unverified" in err_str.lower():
+                user_msg = (
+                    f"The number {target_phone} is unverified on your Twilio trial account. "
+                    "Verify it at console.twilio.com > Phone Numbers > Verified Caller IDs."
+                )
+            else:
+                user_msg = f"Twilio call error: {err_str}"
+        else:
+            if "401" in err_str or "Unauthorised" in err_str or "unauthorized" in err_str.lower():
+                user_msg = (
+                    "Exotel authentication failed. Check EXOTEL_API_KEY, "
+                    "EXOTEL_API_TOKEN, and EXOTEL_ACCOUNT_SID in your .env."
+                )
+            elif "402" in err_str:
+                user_msg = (
+                    "Exotel payment required. Check your account credits or plan."
+                )
+            else:
+                user_msg = f"Exotel call error: {err_str}"
+
+        await _send_to_browser(browser_ws, "error", {"message": user_msg})
     finally:
         call_tasks.pop(call_id, None)
         audio_queues.pop(call_id, None)
-        twilio_call_sids.pop(call_id, None)
+        # Clean up provider-specific SID mappings
+        if provider == "twilio":
+            twilio_call_sids.pop(call_id, None)
+        else:
+            exotel_sid_to_call_id.pop(exotel_call_sids.pop(call_id, ""), None)
         if call_state.status != CallStatus.COMPLETED:
             call_state.status = CallStatus.FAILED
-        if twilio_sid:
-            await _end_twilio_call(twilio_sid)
+        if call_sid:
+            await _end_call(call_sid, provider)
 
 
 # ------------------------------------------------
-# Simulated Call Mode -- Hospital Agent WebSocket
+# Health Check & API
 # ------------------------------------------------
-
-async def _run_call_simulated(
-    call_id: str,
-    mode: str,
-    call_state: CallState,
-    browser_ws: WebSocket,
-):
-    """
-    Use the hospital agent WebSocket for a simulated call.
-    This is the fallback when no real target phone number is available.
-    """
-    twilio_sid = None
-    conversation_log = []
-    try:
-        intent = call_state.user_intent
-        monitor = CallMonitorAgent(call_state)
-        action_agent = ActionAgent(call_state)
-        target_label = intent.target_entity or "simulated agent"
-
-        # Optionally call user's phone so they can listen
-        twilio_ok = False
-        if settings.twilio_account_sid and settings.twilio_auth_token:
-            try:
-                listener_phone = intent.user_phone or settings.default_user_phone
-                await _send_to_browser(browser_ws, "call_status", {
-                    "status": "calling",
-                    "message": f"Dialing your phone ({listener_phone}) to listen...",
-                })
-
-                twilio_sid = await _create_twilio_call(
-                    call_id, listener_phone, play_intro=True,
-                )
-                twilio_call_sids[call_id] = twilio_sid
-
-                await _send_to_browser(browser_ws, "call_status", {
-                    "status": "ringing",
-                    "message": f"Phone ringing... (SID: {twilio_sid})",
-                    "twilio_sid": twilio_sid,
-                })
-
-                for _ in range(45):
-                    if call_id in twilio_streams:
-                        break
-                    await asyncio.sleep(1)
-
-                if call_id in twilio_streams:
-                    twilio_ok = True
-                    await _send_to_browser(browser_ws, "call_status", {
-                        "status": "phone_connected",
-                        "message": "Phone connected. Starting simulated call...",
-                    })
-                else:
-                    await _send_to_browser(browser_ws, "call_status", {
-                        "status": "calling",
-                        "message": "Phone not answered. Browser audio only.",
-                    })
-            except Exception as e:
-                logger.warning(f"[Twilio] Listener call failed: {e}")
-                await _send_to_browser(browser_ws, "call_status", {
-                    "status": "calling",
-                    "message": f"Twilio error: {e}. Browser audio only.",
-                })
-
-        # -- Connect to hospital agent --
-        await _send_to_browser(browser_ws, "call_status", {
-            "status": "calling",
-            "message": f"Connecting to {target_label}...",
-        })
-
-        uri = f"{settings.hospital_agent_url}/ws/call"
-
-        async with websockets.connect(uri) as hospital_ws:
-            await hospital_ws.send(json.dumps({
-                "type": "call_start",
-                "intent": intent.model_dump(mode="json"),
-                "mode": mode,
-            }))
-
-            await _send_to_browser(browser_ws, "call_status", {
-                "status": "in_call",
-                "message": f"Simulated call with {target_label} in progress...",
-            })
-
-            turn_count = 0
-
-            while True:
-                raw = await hospital_ws.recv()
-                msg = json.loads(raw)
-
-                if msg.get("type") != "hospital_speech":
-                    continue
-
-                hospital_text = msg["text"]
-                hospital_audio = msg.get("audio_b64", "")
-                expects = msg.get("expects", "speech")
-                call_ended = msg.get("call_ended", False)
-
-                turn_count += 1
-
-                conversation_log.append({
-                    "speaker": "hospital",
-                    "text": hospital_text,
-                })
-
-                await _send_to_browser(browser_ws, "call_turn", {
-                    "speaker": "hospital",
-                    "text": hospital_text,
-                    "audio_b64": hospital_audio,
-                    "turn": turn_count,
-                })
-
-                await _send_to_browser(browser_ws, "agent_update", {
-                    "agent": 2,
-                    "text": f"Heard: \"{hospital_text[:60]}...\"",
-                    "active": True,
-                })
-
-                # Stream hospital speech to Twilio phone (listener)
-                if twilio_ok and call_id in twilio_streams:
-                    try:
-                        mulaw = await tts_service.text_to_speech_for_twilio(
-                            hospital_text, model="aura-luna-en",
-                        )
-                        await _send_audio_to_twilio(call_id, mulaw)
-                    except Exception as e:
-                        logger.warning(f"[Twilio] Sim hospital TTS failed: {e}")
-
-                if call_ended:
-                    break
-
-                if expects == "none":
-                    continue
-
-                # -- Classify --
-                monitor._conversation_history.append({
-                    "role": "hospital_ivr",
-                    "text": hospital_text,
-                })
-                classification = await monitor._classify_transcript(hospital_text)
-
-                await _send_to_browser(browser_ws, "agent_update", {
-                    "agent": 2,
-                    "text": f"Classified: {classification.prompt_type.value}",
-                    "active": True,
-                })
-
-                # -- Action --
-                agent_action = await action_agent.handle_classification(classification)
-
-                await _send_to_browser(browser_ws, "agent_update", {
-                    "agent": 3,
-                    "text": f"Action: {agent_action.action_type.value}",
-                    "active": True,
-                })
-
-                # -- Build response --
-                agent_audio_b64 = ""
-                display_text = ""
-
-                if agent_action.action_type in (ActionType.SPEAK, ActionType.END_CALL):
-                    display_text = agent_action.speech_text or ""
-                    if display_text:
-                        try:
-                            mp3 = await tts_service.text_to_speech_mp3(
-                                display_text, model=settings.agent_tts_voice,
-                            )
-                            agent_audio_b64 = base64.b64encode(mp3).decode()
-                        except Exception as e:
-                            logger.error(f"[TTS] Agent mp3 failed: {e}")
-
-                elif agent_action.action_type == ActionType.DTMF:
-                    display_text = f"[Pressed {agent_action.dtmf_digits}]"
-
-                elif agent_action.action_type == ActionType.WAIT:
-                    display_text = f"[Waiting: {agent_action.reasoning}]"
-
-                if agent_action.speech_text:
-                    monitor.add_agent_response(agent_action.speech_text)
-
-                turn_count += 1
-
-                conversation_log.append({
-                    "speaker": "agent",
-                    "text": display_text,
-                })
-
-                await _send_to_browser(browser_ws, "call_turn", {
-                    "speaker": "agent",
-                    "text": display_text,
-                    "audio_b64": agent_audio_b64,
-                    "turn": turn_count,
-                    "action_type": agent_action.action_type.value,
-                    "dtmf_digits": agent_action.dtmf_digits,
-                    "reasoning": agent_action.reasoning,
-                })
-
-                # Stream agent speech to Twilio phone (listener)
-                if (
-                    twilio_ok
-                    and call_id in twilio_streams
-                    and agent_action.action_type in (ActionType.SPEAK, ActionType.END_CALL)
-                    and agent_action.speech_text
-                ):
-                    try:
-                        mulaw = await tts_service.text_to_speech_for_twilio(
-                            agent_action.speech_text,
-                            model=settings.agent_tts_voice,
-                        )
-                        await _send_audio_to_twilio(call_id, mulaw)
-                    except Exception as e:
-                        logger.warning(f"[Twilio] Sim agent TTS failed: {e}")
-
-                # -- Send to hospital agent --
-                if agent_action.action_type == ActionType.SPEAK:
-                    await hospital_ws.send(json.dumps({
-                        "type": "caller_speech",
-                        "text": agent_action.speech_text or "",
-                    }))
-                elif agent_action.action_type == ActionType.DTMF:
-                    await hospital_ws.send(json.dumps({
-                        "type": "caller_dtmf",
-                        "digits": agent_action.dtmf_digits or "",
-                    }))
-                elif agent_action.action_type == ActionType.END_CALL:
-                    if agent_action.speech_text:
-                        await hospital_ws.send(json.dumps({
-                            "type": "caller_speech",
-                            "text": agent_action.speech_text,
-                        }))
-                    await hospital_ws.send(json.dumps({"type": "call_end"}))
-                    break
-                elif agent_action.action_type == ActionType.WAIT:
-                    await hospital_ws.send(json.dumps({
-                        "type": "caller_speech",
-                        "text": "Mm-hmm",
-                    }))
-
-        # -- Call completed --
-        call_state.status = CallStatus.COMPLETED
-        await _send_to_browser(browser_ws, "call_complete", {
-            "total_turns": turn_count,
-            "message": "Simulated call completed.",
-        })
-
-        # -- SMS summary --
-        if settings.twilio_account_sid and settings.twilio_auth_token:
-            sms_phone = intent.user_phone or settings.default_user_phone
-            sms_sid = await _send_sms_summary(
-                to_phone=sms_phone,
-                intent=intent,
-                turn_count=turn_count,
-                conversation_log=conversation_log,
-                twilio_sid=twilio_sid,
-            )
-            if sms_sid:
-                await _send_to_browser(browser_ws, "call_status", {
-                    "status": "sms_sent",
-                    "message": f"SMS summary sent to {sms_phone}.",
-                })
-
-    except websockets.exceptions.ConnectionClosed as e:
-        logger.error(f"[Call-Sim] Hospital agent disconnected: {e}")
-        await _send_to_browser(browser_ws, "error", {
-            "message": "Hospital agent disconnected unexpectedly.",
-        })
-    except ConnectionRefusedError:
-        logger.error(f"[Call-Sim] Could not connect to hospital agent")
-        await _send_to_browser(browser_ws, "error", {
-            "message": (
-                "Could not connect to simulated agent. "
-                "Make sure it is running on port 8001."
-            ),
-        })
-    except Exception as e:
-        logger.error(f"[Call-Sim] Error: {e}")
-        await _send_to_browser(browser_ws, "error", {
-            "message": f"Call error: {str(e)}",
-        })
-    finally:
-        call_tasks.pop(call_id, None)
-        twilio_call_sids.pop(call_id, None)
-        if call_state.status != CallStatus.COMPLETED:
-            call_state.status = CallStatus.FAILED
-        if twilio_sid:
-            await _end_twilio_call(twilio_sid)
 
 
 # ------------------------------------------------
@@ -1190,6 +1087,7 @@ async def health():
         "active_sessions": len(active_calls),
         "active_calls": len(call_tasks),
         "twilio_streams": len(twilio_streams),
+        "exotel_streams": len(exotel_streams),
     }
 
 

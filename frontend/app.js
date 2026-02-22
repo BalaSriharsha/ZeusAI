@@ -4,7 +4,7 @@
  * Handles:
  *  - WebSocket connection to the backend
  *  - Microphone audio capture and encoding
- *  - Twilio call status display
+ *  - Provider selection (Twilio / Exotel)
  *  - Live call display with sequential audio playback
  *  - Agent activity visualization
  */
@@ -22,6 +22,7 @@ var callInProgress = false;
 var audioQueue = [];
 var isPlayingAudio = false;
 var audioMuted = false;
+var selectedProvider = "exotel";
 
 // ------------------------------------------------
 // DOM Elements
@@ -136,9 +137,10 @@ function handleCallStatus(data) {
     callSid.textContent = call_id.substring(0, 16) + "...";
   }
 
-  if (data.twilio_sid) {
-    twilioSid.textContent = data.twilio_sid.substring(0, 20) + "...";
-    twilioSid.title = data.twilio_sid;
+  var sid = data.provider_sid || data.twilio_sid || data.exotel_sid;
+  if (sid) {
+    twilioSid.textContent = sid.substring(0, 20) + "...";
+    twilioSid.title = sid;
   }
 
   // Populate profile fields with defaults from backend (only if empty)
@@ -160,7 +162,9 @@ function handleCallStatus(data) {
   } else if (status === "calling") {
     updateStatus("calling", "Dialing...");
     callInProgress = true;
-    updateAgentLog(2, "Initiating Twilio call...", true);
+    var prov = (data.provider || selectedProvider || "").charAt(0).toUpperCase() +
+               (data.provider || selectedProvider || "").slice(1);
+    updateAgentLog(2, "Initiating " + prov + " call...", true);
   } else if (status === "ringing") {
     updateStatus("calling", "Ringing");
     updateAgentLog(2, "Phone ringing...", true);
@@ -192,18 +196,14 @@ function handleReadyForCall(data) {
   addMessage("system", "System", data.message);
   callStateEl.textContent = "Ready";
 
-  // Update call hint based on mode
-  var callMode = data.call_mode || "simulated";
   var target = data.target_entity || "target";
   var phone = data.target_phone || "";
+  var provLabel = selectedProvider === "twilio" ? "Twilio" : "Exotel";
 
-  if (callMode === "real" && phone) {
-    callHint.textContent = "Will call " + target + " at " + phone + " via Twilio.";
-    startCallBtn.querySelector("span").textContent = "Call " + target;
-  } else {
-    callHint.textContent = "Will use simulated agent. Your phone may ring to listen.";
-    startCallBtn.querySelector("span").textContent = "Start Simulated Call";
-  }
+  callHint.textContent = phone
+    ? "Will call " + target + " at " + phone + " via " + provLabel + "."
+    : "Ready to call " + target + ".";
+  startCallBtn.querySelector("span").textContent = "Call " + target;
 }
 
 function handleCallTurn(data) {
@@ -212,9 +212,9 @@ function handleCallTurn(data) {
   var audioB64 = data.audio_b64;
   var turn = data.turn;
 
-  var isHospital = speaker === "hospital";
-  var type = isHospital ? "hospital" : "agent";
-  var label = isHospital ? "Hospital Agent (Maria)" : "Our Agent";
+  var isOther = speaker !== "agent";
+  var type = isOther ? "hospital" : "agent";
+  var label = isOther ? "Other Party" : "Our Agent";
 
   addMessageWithAudio(type, label, text, audioB64);
   callDuration.textContent = String(turn);
@@ -509,22 +509,16 @@ function stopRecording() {
 function startCall() {
   if (!currentCallId) return;
 
-  // Default to conversational IVR
-  var mode = "conversational";
-
   startCallBtn.disabled = true;
   startCallBtn.querySelector("span").textContent = "Calling...";
   callInProgress = true;
 
-  // Clear audio queue for fresh call
   audioQueue = [];
   isPlayingAudio = false;
 
-  addMessage("system", "System", "Starting Twilio call (" + mode + " mode)...");
+  addMessage("system", "System", "Starting call...");
 
-  fetch("/api/start-call/" + currentCallId + "?mode=" + mode, {
-    method: "POST",
-  })
+  fetch("/api/start-call/" + currentCallId + "?provider=" + selectedProvider, { method: "POST" })
     .then(function (resp) {
       if (!resp.ok) {
         return resp.json().then(function (body) {
@@ -552,6 +546,19 @@ function startCall() {
 sendBtn.addEventListener("click", sendText);
 micBtn.addEventListener("click", toggleRecording);
 startCallBtn.addEventListener("click", startCall);
+
+// Provider selector
+document.querySelectorAll("input[name='provider']").forEach(function (radio) {
+  radio.addEventListener("change", function () {
+    selectedProvider = this.value;
+    // Update call hint if it already has a target
+    if (callHint && callHint.textContent.indexOf("Will call") === 0) {
+      var provLabel = selectedProvider === "twilio" ? "Twilio" : "Exotel";
+      callHint.textContent = callHint.textContent.replace(/ via (Twilio|Exotel)\./, " via " + provLabel + ".");
+    }
+  });
+});
+
 
 clearBtn.addEventListener("click", function () {
   conversation.innerHTML =

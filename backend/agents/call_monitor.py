@@ -16,7 +16,7 @@ import struct
 import time
 from typing import Callable, Optional
 
-from backend.services import groq_stt, groq_llm
+from backend.services import sarvam_stt, groq_llm
 from backend.models.schemas import (
     IVRClassification, IVRPromptType, DTMFOption, CallState,
 )
@@ -63,7 +63,7 @@ class CallMonitorAgent:
         """
         # Step 1: Get verbose transcription with timestamps
         try:
-            verbose = await groq_stt.transcribe_audio_verbose(
+            verbose = await sarvam_stt.transcribe_audio_verbose(
                 audio_bytes,
                 language="en",
             )
@@ -115,7 +115,7 @@ class CallMonitorAgent:
     async def _process_simple_transcription(self, audio_bytes: bytes) -> list[dict]:
         """Fallback: transcribe entire audio as a single turn."""
         try:
-            transcript = await groq_stt.transcribe_audio(
+            transcript = await sarvam_stt.transcribe_audio(
                 audio_bytes,
                 prompt="Hospital IVR system speaking. May include menu options with numbers.",
             )

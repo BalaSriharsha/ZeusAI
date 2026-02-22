@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Phone Agent</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/styles.css?v=6">
+<link rel="stylesheet" href="/static/styles.css?v=9">
 </head>
 <body>
 <div class="grain"></div>
@@ -40,7 +40,7 @@
       <div class="conversation" id="conversation">
         <div class="message system">
           <div class="msg-label">System</div>
-          <div class="msg-text">Welcome! Enter your request, then start the call. Your phone will ring and you can listen to the agents interact.</div>
+          <div class="msg-text">Welcome! Enter your request in Step 1, then click Start Call. The agent will dial the number and the conversation will appear here in real time.</div>
         </div>
       </div>
     </section>
@@ -82,6 +82,22 @@
       <!-- Step 2: Start Call -->
       <div class="call-section" id="callSection">
         <h3>Step 2: Start Call</h3>
+        <div class="provider-selector">
+          <label class="provider-opt">
+            <input type="radio" name="provider" value="exotel" id="providerExotel" checked>
+            <span class="provider-tab">
+              <span class="provider-badge exotel-badge">E</span>
+              Exotel
+            </span>
+          </label>
+          <label class="provider-opt">
+            <input type="radio" name="provider" value="twilio" id="providerTwilio">
+            <span class="provider-tab">
+              <span class="provider-badge twilio-badge">T</span>
+              Twilio
+            </span>
+          </label>
+        </div>
         <p class="call-hint" id="callHint">Click to start the call.</p>
         <button class="btn btn-primary call-btn" id="startCallBtn" disabled>
           <span>Start Call</span>
@@ -101,7 +117,7 @@
             <span class="value mono" id="callSid">--</span>
           </div>
           <div class="status-row">
-            <span class="label">Twilio SID</span>
+            <span class="label">Provider SID</span>
             <span class="value mono" id="twilioSid">--</span>
           </div>
           <div class="status-row">
@@ -139,6 +155,6 @@
   </main>
 </div>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=9"></script>
 </body>
 </html>

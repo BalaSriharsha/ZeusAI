@@ -1,8 +1,11 @@
 """
-Audio utilities for processing Twilio Media Stream audio.
+Audio utilities for processing phone stream audio (Twilio and Exotel).
 
-Handles mulaw decoding, energy calculation, voice activity detection,
-and conversion to WAV for STT.
+Both providers normalise to slin16 PCM before entering the queue:
+  - Twilio   : mulaw (8-bit) decoded to slin16 PCM at ingestion time
+  - Exotel   : already slin16 PCM (16-bit, 8kHz, mono, little-endian)
+
+All downstream code (VAD, WAV conversion, STT) works with raw slin16 PCM.
 """
 
 from __future__ import annotations
@@ -11,22 +14,23 @@ import io
 import logging
 import struct
 import time
+import wave
 
 logger = logging.getLogger(__name__)
 
-# Mulaw silence threshold -- average absolute PCM amplitude below this is silence.
-# Lowered to 40 to catch quieter phone audio from real Twilio calls.
+# Average absolute amplitude (slin16) below this is treated as silence.
+# slin16 values range from -32768 to 32767.
 ENERGY_THRESHOLD = 40
 # How many seconds of silence signal the end of a speech turn
 SILENCE_DURATION = 2.0
 # Maximum duration to wait for speech (seconds)
 MAX_SPEECH_WAIT = 45.0
-# Minimum speech duration to be worth transcribing (seconds at 8kHz)
-MIN_SPEECH_BYTES = 3200  # ~0.4 seconds
+# Minimum speech duration to be worth transcribing (0.4s at 8kHz 16-bit)
+MIN_SPEECH_BYTES = 6400  # 8000 samples/s * 0.4s * 2 bytes
 
 
 def mulaw_to_linear(b: int) -> int:
-    """Decode a single mulaw byte to signed 16-bit linear PCM."""
+    """Decode a single mulaw byte to signed 16-bit linear PCM sample."""
     b = ~b & 0xFF
     sign = b & 0x80
     exponent = (b >> 4) & 0x07
@@ -36,36 +40,40 @@ def mulaw_to_linear(b: int) -> int:
     return -magnitude if sign else magnitude
 
 
+def mulaw_to_pcm_bytes(mulaw_bytes: bytes) -> bytes:
+    """
+    Convert raw mulaw bytes (from Twilio) to signed 16-bit little-endian PCM.
+    Call this at queue-insertion time so the queue always holds slin16 PCM.
+    """
+    samples = [mulaw_to_linear(b) for b in mulaw_bytes]
+    return struct.pack(f"<{len(samples)}h", *samples)
+
+
 def chunk_energy(data: bytes) -> float:
-    """Calculate average absolute amplitude of a mulaw audio chunk."""
-    if not data:
+    """Calculate average absolute amplitude of a slin16 PCM chunk."""
+    num_samples = len(data) // 2
+    if num_samples == 0:
         return 0.0
-    total = sum(abs(mulaw_to_linear(b)) for b in data)
-    return total / len(data)
+    samples = struct.unpack(f"<{num_samples}h", data[:num_samples * 2])
+    return sum(abs(s) for s in samples) / num_samples
 
 
 def is_speech(data: bytes, threshold: float = ENERGY_THRESHOLD) -> bool:
-    """Check if a mulaw audio chunk contains speech above the threshold."""
+    """Check if a slin16 PCM chunk contains speech above the threshold."""
     return chunk_energy(data) > threshold
 
 
-def mulaw_to_wav(mulaw_bytes: bytes, sample_rate: int = 8000) -> bytes:
+def pcm16_to_wav(pcm_bytes: bytes, sample_rate: int = 8000) -> bytes:
     """
-    Convert raw mulaw audio bytes to WAV format (16-bit PCM).
+    Wrap raw 16-bit little-endian PCM bytes into WAV format.
     Returns a complete WAV file as bytes, suitable for STT.
     """
-    # Decode mulaw to 16-bit signed PCM
-    pcm_samples = [mulaw_to_linear(b) for b in mulaw_bytes]
-
-    # Write WAV
     buf = io.BytesIO()
-    import wave
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        wf.writeframes(struct.pack(f"<{len(pcm_samples)}h", *pcm_samples))
-
+        wf.writeframes(pcm_bytes)
     return buf.getvalue()
 
 
@@ -80,13 +88,13 @@ async def receive_speech(
     speaker stops talking (detected by silence after speech).
 
     Args:
-        queue: asyncio.Queue receiving mulaw audio chunks (bytes)
+        queue: asyncio.Queue receiving slin16 PCM audio chunks (bytes)
         timeout: Maximum seconds to wait for any speech
         silence_duration: Seconds of silence to end a speech turn
         energy_threshold: Amplitude threshold to distinguish speech from silence
 
     Returns:
-        Raw mulaw bytes of the speech segment, or empty bytes if nothing detected.
+        Raw slin16 PCM bytes of the speech segment, or empty bytes if nothing detected.
     """
     audio_buffer = bytearray()
     speech_detected = False
@@ -97,7 +105,6 @@ async def receive_speech(
         try:
             chunk = await asyncio.wait_for(queue.get(), timeout=0.3)
         except asyncio.TimeoutError:
-            # No audio received
             if speech_detected and silence_start is not None:
                 if time.time() - silence_start >= silence_duration:
                     break

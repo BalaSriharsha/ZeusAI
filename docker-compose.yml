@@ -6,33 +6,12 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Override so the backend reaches hospital-agent by service name
-      - HOSPITAL_AGENT_URL=ws://hospital-agent:8001
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       redis:
         condition: service_healthy
-      hospital-agent:
-        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    networks:
-      - internal
-
-  # ── Hospital Agent Simulator (Port 8001) ─────────────────────────
-  hospital-agent:
-    build: .
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-    command: ["uvicorn", "hospital_agent.main:app", "--host", "0.0.0.0", "--port", "8001", "--log-level", "info"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
