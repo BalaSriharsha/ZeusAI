@@ -1,0 +1,31 @@
+# Cloudflare Tunnel override
+#
+# Replaces nginx with cloudflared, which routes traffic from
+# Cloudflare's edge (your domain) to the backend container.
+# No SSL certs or open ports needed -- Cloudflare handles all of that.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml up -d
+#
+# Requires CLOUDFLARE_TUNNEL_TOKEN in your .env
+
+services:
+
+  # ── Cloudflare Tunnel ─────────────────────────────────────────────
+  # Routes your domain (e.g. app.ayanetic.com) -> http://backend:8000
+  # Configured in Cloudflare Zero Trust dashboard.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - backend
+    networks:
+      - internal
+
+  # ── Disable nginx (Cloudflare handles SSL + routing) ─────────────
+  nginx:
+    profiles:
+      - disabled

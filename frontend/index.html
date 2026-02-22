@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Phone Agent</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css?v=6">
+</head>
+<body>
+<div class="grain"></div>
+
+<div class="app">
+  <!-- Header -->
+  <header class="header">
+    <div class="logo">
+      <div class="logo-icon">AI</div>
+      <div>
+        <h1>AI Phone Agent</h1>
+        <p class="tagline">AI-powered phone agent</p>
+      </div>
+    </div>
+    <div class="status-badge" id="statusBadge">
+      <span class="status-dot"></span>
+      <span class="status-text">Disconnected</span>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="main">
+    <!-- Left: Live Conversation -->
+    <section class="conversation-panel">
+      <div class="panel-header">
+        <h2>Live Call</h2>
+        <div class="panel-actions">
+          <button class="btn btn-ghost" id="muteBtn" title="Mute/Unmute auto-play">Mute</button>
+          <button class="btn btn-ghost" id="clearBtn" title="Clear conversation">x</button>
+        </div>
+      </div>
+      <div class="conversation" id="conversation">
+        <div class="message system">
+          <div class="msg-label">System</div>
+          <div class="msg-text">Welcome! Enter your request, then start the call. Your phone will ring and you can listen to the agents interact.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right: Controls -->
+    <section class="control-panel">
+      <!-- Step 1: User Input -->
+      <div class="input-section">
+        <h3>Step 1: Your Request</h3>
+        <div class="profile-fields">
+          <div class="profile-field">
+            <label for="userName">Name</label>
+            <input type="text" id="userName" placeholder="Your name">
+          </div>
+          <div class="profile-field">
+            <label for="userPhone">Phone</label>
+            <input type="tel" id="userPhone" placeholder="Mobile number (will be called)">
+          </div>
+        </div>
+        <div class="input-group">
+          <textarea
+            id="textInput"
+            placeholder="e.g., Book an appointment with Dermatologist Chandra at Apollo Hospital, Madinaguda, Hyderabad on 15th April 2026"
+            rows="3"
+          ></textarea>
+          <div class="input-actions">
+            <button class="btn btn-primary" id="sendBtn">
+              <span>Send</span>
+              <span class="shortcut">Enter</span>
+            </button>
+            <button class="btn btn-secondary" id="micBtn">
+              <span class="mic-icon">mic</span>
+              <span id="micLabel">Record</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2: Start Call -->
+      <div class="call-section" id="callSection">
+        <h3>Step 2: Start Call</h3>
+        <p class="call-hint" id="callHint">Click to start the call.</p>
+        <button class="btn btn-primary call-btn" id="startCallBtn" disabled>
+          <span>Start Call</span>
+        </button>
+      </div>
+
+      <!-- Session Status -->
+      <div class="status-section">
+        <h3>Session Status</h3>
+        <div class="status-card" id="callStatus">
+          <div class="status-row">
+            <span class="label">State</span>
+            <span class="value" id="callState">Idle</span>
+          </div>
+          <div class="status-row">
+            <span class="label">Session</span>
+            <span class="value mono" id="callSid">--</span>
+          </div>
+          <div class="status-row">
+            <span class="label">Twilio SID</span>
+            <span class="value mono" id="twilioSid">--</span>
+          </div>
+          <div class="status-row">
+            <span class="label">Turns</span>
+            <span class="value mono" id="callDuration">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Intent Display -->
+      <div class="intent-section" id="intentSection" style="display: none;">
+        <h3>Extracted Intent</h3>
+        <div class="intent-card" id="intentCard"></div>
+      </div>
+
+      <!-- Agent Activity -->
+      <div class="agents-section">
+        <h3>Agent Activity</h3>
+        <div class="agent-log" id="agentLog">
+          <div class="agent-entry idle">
+            <span class="agent-badge a1">A1</span>
+            <span>Input Agent -- Waiting for input</span>
+          </div>
+          <div class="agent-entry idle">
+            <span class="agent-badge a2">A2</span>
+            <span>Call Monitor -- Idle</span>
+          </div>
+          <div class="agent-entry idle">
+            <span class="agent-badge a3">A3</span>
+            <span>Action Agent -- Idle</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/app.js?v=6"></script>
+</body>
+</html>

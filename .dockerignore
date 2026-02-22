@@ -1,0 +1,15 @@
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.DS_Store
+.git/
+.gitignore
+*.log
+*.tmp
+node_modules/
+architecture.html

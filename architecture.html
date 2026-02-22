@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Phone Agent — System Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--border:#1e1e2e;
+  --accent:#00e5a0;--accent2:#6366f1;--accent3:#f59e0b;
+  --text:#e2e8f0;--muted:#64748b;
+  --agent1:#00e5a0;--agent2:#6366f1;--agent3:#f59e0b;
+}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);overflow-x:hidden;min-height:100vh}
+.grain{position:fixed;inset:0;pointer-events:none;opacity:.03;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+header{text-align:center;padding:3rem 2rem 2rem;position:relative}
+header::after{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:120px;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent)}
+h1{font-family:'JetBrains Mono',monospace;font-size:2rem;font-weight:700;letter-spacing:-0.02em;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.subtitle{color:var(--muted);margin-top:.5rem;font-size:.95rem}
+
+.container{max-width:1200px;margin:0 auto;padding:2rem}
+
+/* Flow Diagram */
+.flow{display:flex;flex-direction:column;gap:1.5rem;margin:2rem 0}
+.flow-row{display:flex;align-items:center;justify-content:center;gap:1rem;flex-wrap:wrap}
+.node{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1rem 1.5rem;position:relative;transition:all .3s;min-width:160px;text-align:center}
+.node:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(0,0,0,.4)}
+.node.user{border-color:var(--agent1);box-shadow:0 0 20px rgba(0,229,160,.1)}
+.node.agent1{border-color:var(--agent1);box-shadow:0 0 20px rgba(0,229,160,.1)}
+.node.agent2{border-color:var(--agent2);box-shadow:0 0 20px rgba(99,102,241,.1)}
+.node.agent3{border-color:var(--agent3);box-shadow:0 0 20px rgba(245,158,11,.1)}
+.node.service{border-color:var(--muted);border-style:dashed}
+.node-label{font-family:'JetBrains Mono',monospace;font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin-bottom:.25rem}
+.node.agent1 .node-label{color:var(--agent1)}
+.node.agent2 .node-label{color:var(--agent2)}
+.node.agent3 .node-label{color:var(--agent3)}
+.node.service .node-label{color:var(--muted)}
+.node-title{font-weight:500;font-size:.9rem}
+.arrow{color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:1.2rem;flex-shrink:0}
+
+/* Sections */
+.section{margin:3rem 0}
+.section-title{font-family:'JetBrains Mono',monospace;font-size:1.1rem;font-weight:700;margin-bottom:1.5rem;display:flex;align-items:center;gap:.75rem}
+.section-title .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:1.5rem}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:1.5rem;transition:all .3s}
+.card:hover{border-color:rgba(255,255,255,.1)}
+.card h3{font-family:'JetBrains Mono',monospace;font-size:.85rem;font-weight:600;margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem}
+.card h3 .icon{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:.85rem;flex-shrink:0}
+.card p,.card li{font-size:.85rem;color:var(--muted);line-height:1.6}
+.card ul{list-style:none;padding:0}
+.card li::before{content:'→ ';color:var(--accent);font-family:'JetBrains Mono',monospace}
+
+.tech-stack{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem;margin-top:1rem}
+.tech{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1rem;text-align:center}
+.tech-name{font-family:'JetBrains Mono',monospace;font-size:.8rem;font-weight:600;color:var(--accent)}
+.tech-role{font-size:.75rem;color:var(--muted);margin-top:.25rem}
+
+.sequence{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:2rem;margin:1.5rem 0;overflow-x:auto}
+.seq-step{display:flex;align-items:flex-start;gap:1rem;padding:.75rem 0;border-bottom:1px solid var(--border)}
+.seq-step:last-child{border-bottom:none}
+.seq-num{font-family:'JetBrains Mono',monospace;font-size:.7rem;font-weight:700;background:var(--border);color:var(--text);border-radius:6px;padding:.2rem .5rem;flex-shrink:0;min-width:28px;text-align:center}
+.seq-text{font-size:.82rem;color:var(--muted);line-height:1.5}
+.seq-text strong{color:var(--text);font-weight:600}
+.seq-text code{font-family:'JetBrains Mono',monospace;font-size:.75rem;background:var(--border);padding:.1rem .4rem;border-radius:4px;color:var(--accent)}
+
+.file-tree{font-family:'JetBrains Mono',monospace;font-size:.8rem;line-height:2;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:1.5rem 2rem;white-space:pre}
+.file-tree .dir{color:var(--accent2)}
+.file-tree .file{color:var(--text)}
+
+@media(max-width:768px){
+  .grid{grid-template-columns:1fr}
+  .flow-row{flex-direction:column}
+  .arrow{transform:rotate(90deg)}
+  h1{font-size:1.4rem}
+}
+</style>
+</head>
+<body>
+<div class="grain"></div>
+
+<header>
+  <h1>AI Phone Agent Framework</h1>
+  <p class="subtitle">Multi-Agent Architecture for Automated Toll-Free Call Handling</p>
+</header>
+
+<div class="container">
+
+  <!-- High-Level Flow -->
+  <section class="section">
+    <div class="section-title"><div class="dot" style="background:var(--accent)"></div>System Flow</div>
+    <div class="flow">
+      <div class="flow-row">
+        <div class="node user">
+          <div class="node-label" style="color:var(--text)">User</div>
+          <div class="node-title">🎤 Browser UI</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node agent1">
+          <div class="node-label">Agent 1</div>
+          <div class="node-title">Input Agent</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node service">
+          <div class="node-label">Service</div>
+          <div class="node-title">Twilio Call</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node" style="border-color:#ef4444;box-shadow:0 0 20px rgba(239,68,68,.1)">
+          <div class="node-label" style="color:#ef4444">External</div>
+          <div class="node-title">Hospital IVR</div>
+        </div>
+      </div>
+      <div class="flow-row">
+        <div class="node service">
+          <div class="node-label">Service</div>
+          <div class="node-title">Groq Whisper STT</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node agent2">
+          <div class="node-label">Agent 2</div>
+          <div class="node-title">Call Monitor</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node agent3">
+          <div class="node-label">Agent 3</div>
+          <div class="node-title">Action Agent</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node service">
+          <div class="node-label">Service</div>
+          <div class="node-title">Deepgram TTS / DTMF</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Three Agents -->
+  <section class="section">
+    <div class="section-title"><div class="dot" style="background:var(--accent2)"></div>The Three Agents</div>
+    <div class="grid">
+      <div class="card" style="border-color:rgba(0,229,160,.2)">
+        <h3><span class="icon" style="background:rgba(0,229,160,.15);color:var(--agent1)">1</span> Input Agent</h3>
+        <ul>
+          <li>Captures user voice from browser via WebRTC</li>
+          <li>Sends audio to Groq Whisper for transcription</li>
+          <li>Uses Groq LLM to extract intent, entities (doctor, hospital, date, etc.)</li>
+          <li>Looks up hospital toll-free number</li>
+          <li>Initiates Twilio outbound call</li>
+          <li>Passes structured intent to Agent 2 & 3</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:rgba(99,102,241,.2)">
+        <h3><span class="icon" style="background:rgba(99,102,241,.15);color:var(--agent2)">2</span> Call Monitor Agent</h3>
+        <ul>
+          <li>Receives real-time audio stream from Twilio call</li>
+          <li>Streams audio chunks to Groq Whisper for live transcription</li>
+          <li>Uses Groq LLM to understand IVR prompts & questions</li>
+          <li>Classifies: free-form question, confirmation, DTMF menu, date input, info request</li>
+          <li>Passes classified understanding to Agent 3</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:rgba(245,158,11,.2)">
+        <h3><span class="icon" style="background:rgba(245,158,11,.15);color:var(--agent3)">3</span> Action Agent</h3>
+        <ul>
+          <li>Receives classified prompts from Agent 2</li>
+          <li>Decides action: speak response, press DTMF key, type digits</li>
+          <li>Generates natural responses via Groq LLM</li>
+          <li>Converts text to speech via Deepgram TTS</li>
+          <li>Sends audio/DTMF back through Twilio into the call</li>
+          <li>Reports status back to user via WebSocket</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tech Stack -->
+  <section class="section">
+    <div class="section-title"><div class="dot" style="background:var(--accent3)"></div>Technology Stack</div>
+    <div class="tech-stack">
+      <div class="tech"><div class="tech-name">FastAPI + WebSocket</div><div class="tech-role">Backend Orchestrator</div></div>
+      <div class="tech"><div class="tech-name">Groq Whisper</div><div class="tech-role">Speech-to-Text (STT)</div></div>
+      <div class="tech"><div class="tech-name">Groq LLaMA 3.3 70B</div><div class="tech-role">LLM Reasoning</div></div>
+      <div class="tech"><div class="tech-name">Deepgram Aura</div><div class="tech-role">Text-to-Speech (TTS)</div></div>
+      <div class="tech"><div class="tech-name">Twilio Voice</div><div class="tech-role">Telephony / DTMF</div></div>
+      <div class="tech"><div class="tech-name">Redis</div><div class="tech-role">Call State & Pub/Sub</div></div>
+      <div class="tech"><div class="tech-name">React (Vite)</div><div class="tech-role">Browser Frontend</div></div>
+      <div class="tech"><div class="tech-name">Docker</div><div class="tech-role">Deployment</div></div>
+    </div>
+  </section>
+
+  <!-- Call Sequence -->
+  <section class="section">
+    <div class="section-title"><div class="dot" style="background:var(--accent)"></div>Call Sequence (Scenario 1 — Conversational IVR)</div>
+    <div class="sequence">
+      <div class="seq-step"><span class="seq-num">1</span><span class="seq-text"><strong>User</strong> speaks in browser: "Book an appointment with Dr. Chandra..."</span></div>
+      <div class="seq-step"><span class="seq-num">2</span><span class="seq-text"><strong>Agent 1</strong> → Groq Whisper transcribes → Groq LLM extracts <code>intent=book</code>, <code>doctor=Chandra</code>, <code>date=2026-04-15</code></span></div>
+      <div class="seq-step"><span class="seq-num">3</span><span class="seq-text"><strong>Agent 1</strong> → Twilio initiates call to Apollo toll-free number</span></div>
+      <div class="seq-step"><span class="seq-num">4</span><span class="seq-text"><strong>Hospital IVR</strong> speaks: "Hello, thank you for calling..."</span></div>
+      <div class="seq-step"><span class="seq-num">5</span><span class="seq-text"><strong>Agent 2</strong> → Groq Whisper transcribes IVR → LLM classifies as <code>type=open_question</code></span></div>
+      <div class="seq-step"><span class="seq-num">6</span><span class="seq-text"><strong>Agent 3</strong> → LLM generates response → Deepgram TTS → audio played into call</span></div>
+      <div class="seq-step"><span class="seq-num">7</span><span class="seq-text">Loop: <strong>Agent 2</strong> monitors → <strong>Agent 3</strong> responds until confirmation or call ends</span></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><div class="dot" style="background:var(--accent2)"></div>Call Sequence (Scenario 2 — DTMF Menu IVR)</div>
+    <div class="sequence">
+      <div class="seq-step"><span class="seq-num">1</span><span class="seq-text"><strong>Agent 2</strong> detects DTMF menu pattern: "press 1 for X, press 2 for Y..."</span></div>
+      <div class="seq-step"><span class="seq-num">2</span><span class="seq-text"><strong>Agent 2</strong> → LLM classifies as <code>type=dtmf_menu</code> with options map</span></div>
+      <div class="seq-step"><span class="seq-num">3</span><span class="seq-text"><strong>Agent 3</strong> → matches user intent to correct DTMF key → sends via Twilio</span></div>
+      <div class="seq-step"><span class="seq-num">4</span><span class="seq-text">For <code>type=date_input</code>: Agent 3 formats date as DTMF digits <code>15042026</code></span></div>
+      <div class="seq-step"><span class="seq-num">5</span><span class="seq-text">For <code>type=confirmation</code>: Agent 3 speaks "Yes, that is correct" via TTS</span></div>
+    </div>
+  </section>
+
+  <!-- File Structure -->
+  <section class="section">
+    <div class="section-title"><div class="dot" style="background:var(--accent3)"></div>Project Structure</div>
+    <div class="file-tree"><span class="dir">ai-phone-agent/</span>
+├── <span class="file">.env.example</span>
+├── <span class="file">requirements.txt</span>
+├── <span class="file">docker-compose.yml</span>
+├── <span class="file">README.md</span>
+├── <span class="dir">backend/</span>
+│   ├── <span class="file">main.py</span>              <span style="color:var(--muted)">← FastAPI app + WebSocket</span>
+│   ├── <span class="file">config.py</span>            <span style="color:var(--muted)">← Settings & env vars</span>
+│   ├── <span class="dir">agents/</span>
+│   │   ├── <span class="file">input_agent.py</span>   <span style="color:var(--muted)">← Agent 1: user input → intent</span>
+│   │   ├── <span class="file">call_monitor.py</span>  <span style="color:var(--muted)">← Agent 2: IVR transcription → classification</span>
+│   │   └── <span class="file">action_agent.py</span>  <span style="color:var(--muted)">← Agent 3: decide & act</span>
+│   ├── <span class="dir">services/</span>
+│   │   ├── <span class="file">groq_stt.py</span>      <span style="color:var(--muted)">← Groq Whisper STT</span>
+│   │   ├── <span class="file">groq_llm.py</span>      <span style="color:var(--muted)">← Groq LLaMA reasoning</span>
+│   │   ├── <span class="file">tts_service.py</span>   <span style="color:var(--muted)">← Deepgram TTS</span>
+│   │   └── <span class="file">twilio_call.py</span>   <span style="color:var(--muted)">← Twilio telephony</span>
+│   └── <span class="dir">models/</span>
+│       └── <span class="file">schemas.py</span>       <span style="color:var(--muted)">← Pydantic models</span>
+└── <span class="dir">frontend/</span>
+    ├── <span class="file">index.html</span>           <span style="color:var(--muted)">← Browser UI</span>
+    ├── <span class="file">app.js</span>               <span style="color:var(--muted)">← WebSocket + audio capture</span>
+    └── <span class="file">styles.css</span>           <span style="color:var(--muted)">← Styling</span></div>
+  </section>
+
+</div>
+</body>
+</html>

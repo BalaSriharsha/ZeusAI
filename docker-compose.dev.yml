@@ -1,0 +1,44 @@
+# Development overrides -- use with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+
+  backend:
+    # Mount source for hot reload
+    volumes:
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+      - --log-level
+      - debug
+
+  hospital-agent:
+    volumes:
+      - ./hospital_agent:/app/hospital_agent
+    command:
+      - uvicorn
+      - hospital_agent.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8001"
+      - --reload
+      - --log-level
+      - debug
+
+  # In development, expose redis directly for inspection
+  redis:
+    ports:
+      - "6379:6379"
+
+  # Skip nginx in development -- access backend directly on port 8000
+  nginx:
+    profiles:
+      - donotstart

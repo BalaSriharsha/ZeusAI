@@ -1,0 +1,591 @@
+/* ================================================
+   AI Phone Agent -- Styles
+   ================================================ */
+
+:root {
+  --bg: #07070b;
+  --surface: #0e0e16;
+  --surface2: #14141e;
+  --border: #1c1c2e;
+  --border-light: #2a2a40;
+  --accent: #00e5a0;
+  --accent-dim: rgba(0, 229, 160, 0.15);
+  --accent2: #6366f1;
+  --accent3: #f59e0b;
+  --red: #ef4444;
+  --text: #e2e8f0;
+  --text-muted: #64748b;
+  --text-dim: #475569;
+  --radius: 12px;
+  --mono: 'JetBrains Mono', monospace;
+  --sans: 'DM Sans', -apple-system, sans-serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.grain {
+  position: fixed; inset: 0;
+  pointer-events: none; opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* -- Header ----------------------------------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.logo {
+  display: flex; align-items: center; gap: 0.75rem;
+}
+
+.logo-icon {
+  font-size: 1.5rem;
+  width: 40px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-dim);
+  border-radius: 10px;
+}
+
+.logo h1 {
+  font-family: var(--mono);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.status-badge {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-family: var(--mono);
+}
+
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  transition: background 0.3s;
+}
+
+.status-badge.connected .status-dot { background: var(--accent); }
+.status-badge.calling .status-dot {
+  background: var(--accent3);
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* -- Main Layout ------------------------------ */
+
+.main {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  height: calc(100vh - 65px);
+}
+
+@media (max-width: 900px) {
+  .main { grid-template-columns: 1fr; }
+  .control-panel { max-height: 50vh; overflow-y: auto; }
+}
+
+/* -- Conversation Panel ----------------------- */
+
+.conversation-panel {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+
+.panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-header h2 {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.conversation {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* -- Messages --------------------------------- */
+
+.message {
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  max-width: 85%;
+  animation: fadeIn 0.3s ease;
+  transition: box-shadow 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.msg-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.3rem;
+}
+
+.message .msg-label {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.message .msg-text {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.message.system {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  align-self: center;
+  max-width: 90%;
+  text-align: center;
+}
+.message.system .msg-label { color: var(--text-muted); }
+
+.message.user {
+  background: rgba(0, 229, 160, 0.08);
+  border: 1px solid rgba(0, 229, 160, 0.2);
+  align-self: flex-end;
+}
+.message.user .msg-label { color: var(--accent); }
+
+.message.hospital {
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  align-self: flex-start;
+}
+.message.hospital .msg-label { color: var(--accent2); }
+
+.message.agent {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  align-self: flex-end;
+}
+.message.agent .msg-label { color: var(--accent3); }
+
+.message.error {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  align-self: center;
+}
+.message.error .msg-label { color: var(--red); }
+
+/* Speaking indicator -- active audio playback */
+.message.speaking {
+  box-shadow: 0 0 0 2px var(--accent), 0 0 12px rgba(0, 229, 160, 0.15);
+}
+
+.message.hospital.speaking {
+  box-shadow: 0 0 0 2px var(--accent2), 0 0 12px rgba(99, 102, 241, 0.15);
+}
+
+.message.agent.speaking {
+  box-shadow: 0 0 0 2px var(--accent3), 0 0 12px rgba(245, 158, 11, 0.15);
+}
+
+/* -- Audio Play Button ------------------------ */
+
+.audio-play-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-muted);
+  font-size: 0.55rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.audio-play-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--text);
+}
+
+.audio-play-btn.playing {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* -- Control Panel ---------------------------- */
+
+.control-panel {
+  padding: 1rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.control-panel h3 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+/* -- Input ------------------------------------ */
+
+/* -- Profile Fields --------------------------- */
+
+.profile-fields {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.profile-field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.profile-field label {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.profile-field input {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  transition: border-color 0.2s;
+}
+
+.profile-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.profile-field input::placeholder {
+  color: var(--text-dim);
+}
+
+/* -- Input Group ------------------------------ */
+
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+textarea {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  resize: vertical;
+  transition: border-color 0.2s;
+}
+
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+textarea::placeholder { color: var(--text-dim); }
+
+.input-actions {
+  display: flex; gap: 0.5rem;
+}
+
+/* -- Buttons ---------------------------------- */
+
+.btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.btn:hover { border-color: var(--border-light); }
+.btn:active { transform: scale(0.97); }
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+  flex: 1;
+}
+.btn-primary:hover { opacity: 0.9; }
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-secondary { flex: 0 0 auto; }
+.btn-secondary.recording {
+  border-color: var(--red);
+  color: var(--red);
+  animation: pulse 1s infinite;
+}
+
+.btn-ghost {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 0.25rem 0.5rem;
+}
+.btn-ghost:hover { color: var(--text); }
+.btn-ghost.active {
+  color: var(--red);
+}
+
+.shortcut {
+  opacity: 0.5;
+  font-size: 0.7rem;
+}
+
+/* -- Call Section ------------------------------ */
+
+.call-section {
+  opacity: 0.4;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+.call-section.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.call-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.call-btn {
+  width: 100%;
+  justify-content: center;
+}
+
+/* -- Scenario Selector ------------------------ */
+
+.scenario-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.scenario-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.75rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.scenario-option:hover {
+  border-color: var(--border-light);
+}
+
+.scenario-option input[type="radio"] {
+  margin-top: 3px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.scenario-option input[type="radio"]:checked ~ div .scenario-label {
+  color: var(--accent);
+}
+
+.scenario-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+  display: block;
+  margin-bottom: 0.15rem;
+}
+
+.scenario-desc {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  display: block;
+}
+
+/* -- Status Card ------------------------------ */
+
+.status-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+}
+
+.status-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.35rem 0;
+}
+
+.status-row:not(:last-child) {
+  border-bottom: 1px solid var(--border);
+}
+
+.status-row .label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: var(--mono);
+}
+
+.status-row .value {
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.status-row .value.mono {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+
+/* -- Intent Card ------------------------------ */
+
+.intent-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  font-size: 0.8rem;
+}
+
+.intent-row {
+  display: flex; gap: 0.5rem;
+  padding: 0.25rem 0;
+}
+
+.intent-key {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--accent);
+  min-width: 80px;
+}
+
+.intent-val {
+  color: var(--text);
+}
+
+/* -- Agent Log -------------------------------- */
+
+.agent-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.agent-entry {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  transition: all 0.3s;
+}
+
+.agent-entry.active {
+  color: var(--text);
+  border-color: var(--border-light);
+}
+
+.agent-badge {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.agent-badge.a1 { background: rgba(0, 229, 160, 0.15); color: var(--accent); }
+.agent-badge.a2 { background: rgba(99, 102, 241, 0.15); color: var(--accent2); }
+.agent-badge.a3 { background: rgba(245, 158, 11, 0.15); color: var(--accent3); }
+
+/* -- Scrollbar -------------------------------- */
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
