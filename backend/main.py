@@ -23,6 +23,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from backend.config import settings
 from backend.agents import InputAgent, CallMonitorAgent, ActionAgent
@@ -32,7 +33,9 @@ from backend.models.schemas import (
 from backend.services import tts_service, sarvam_stt
 from backend.services.audio_utils import (
     receive_speech, pcm16_to_wav, mulaw_to_pcm_bytes,
+    generate_dtmf_tone, generate_dtmf_tone_mulaw,
 )
+from backend.registry import phone_registry
 
 # ------------------------------------------------
 # Logging
@@ -164,7 +167,7 @@ async def browser_websocket(ws: WebSocket):
     browser_connections[call_id] = ws
     logger.info(f"[WS] Browser connected: {call_id}")
 
-    input_agent = InputAgent()
+    input_agent = InputAgent(registry=phone_registry)
 
     try:
         await _send_to_browser(ws, "call_status", {
@@ -173,6 +176,11 @@ async def browser_websocket(ws: WebSocket):
             "call_id": call_id,
             "default_name": settings.default_user_name,
             "default_phone": settings.default_user_phone,
+            "default_dob": settings.default_dob,
+            "default_age": settings.default_age,
+            "default_gender": settings.default_gender,
+            "default_weight": settings.default_weight,
+            "default_height": settings.default_height,
         })
 
         while True:
@@ -237,6 +245,16 @@ async def _handle_user_input(
             intent.user_name = user_name
         if user_phone:
             intent.user_phone = user_phone
+        if user_dob:
+            intent.user_dob = user_dob
+        if user_age:
+            intent.user_age = user_age
+        if user_gender:
+            intent.user_gender = user_gender
+        if user_weight:
+            intent.user_weight = user_weight
+        if user_height:
+            intent.user_height = user_height
 
         await _send_to_browser(ws, "transcript", {
             "role": "user",
@@ -263,7 +281,7 @@ async def _handle_user_input(
             await _send_to_browser(ws, "error", {
                 "message": (
                     f"No phone number found for \"{target}\". "
-                    "Add the number to PHONE_REGISTRY in your .env, "
+                    "Add the contact in the Contacts panel, "
                     "or include the phone number directly in your request."
                 ),
             })
@@ -390,28 +408,51 @@ async def twilio_media_stream(ws: WebSocket, call_id: str):
     except Exception as e:
         logger.error(f"[Twilio] Stream error: {e}")
     finally:
-        twilio_streams.pop(call_id, None)
-        twilio_stream_sids.pop(call_id, None)
-        queue = audio_queues.get(call_id)
-        if queue:
-            await queue.put(None)  # sentinel value
+        # Only clean up if this websocket is STILL the active one.
+        # During DTMF TwiML updates, a new stream might connect and overwrite
+        # the dict BEFORE the old stream fully disconnects.
+        is_active = (twilio_streams.get(call_id) is ws)
+        
+        if is_active:
+            twilio_streams.pop(call_id, None)
+            
+        if twilio_stream_sids.get(call_id) == stream_sid:
+            twilio_stream_sids.pop(call_id, None)
+
+        # Only put the End-Of-Stream sentinel if there's no active stream 
+        # (meaning the call is actually ending, not just reconnecting for DTMF)
+        if not twilio_streams.get(call_id):
+            queue = audio_queues.get(call_id)
+            if queue:
+                await queue.put(None)
 
 
 async def _send_audio_to_twilio(call_id: str, mulaw_bytes: bytes):
     ws = twilio_streams.get(call_id)
     stream_sid = twilio_stream_sids.get(call_id)
     if not ws or not stream_sid:
+        logger.warning(
+            f"[Twilio] Cannot send audio: ws={ws is not None}, "
+            f"stream_sid={stream_sid}, call_id={call_id}"
+        )
         return
+
+    logger.info(
+        f"[Twilio] Sending {len(mulaw_bytes)} mulaw bytes to stream "
+        f"{stream_sid} (call {call_id})"
+    )
 
     try:
         await ws.send_text(json.dumps({
             "event": "clear",
             "streamSid": stream_sid,
         }))
-    except Exception:
+    except Exception as e:
+        logger.error(f"[Twilio] Failed to send clear event: {e}")
         return
 
     CHUNK_SIZE = 640
+    chunks_sent = 0
     for i in range(0, len(mulaw_bytes), CHUNK_SIZE):
         chunk = mulaw_bytes[i:i + CHUNK_SIZE]
         payload = base64.b64encode(chunk).decode()
@@ -421,11 +462,16 @@ async def _send_audio_to_twilio(call_id: str, mulaw_bytes: bytes):
                 "streamSid": stream_sid,
                 "media": {"payload": payload},
             }))
-        except Exception:
+            chunks_sent += 1
+        except Exception as e:
+            logger.error(f"[Twilio] Failed to send chunk {chunks_sent}: {e}")
             break
 
     # mulaw at 8kHz: 8000 bytes/sec
     duration = len(mulaw_bytes) / 8000.0
+    logger.info(
+        f"[Twilio] Sent {chunks_sent} chunks, waiting {duration:.1f}s for playback"
+    )
     await asyncio.sleep(duration + 0.3)
 
 
@@ -752,11 +798,11 @@ def _stream_connected(call_id: str, provider: str) -> bool:
     return call_id in exotel_streams
 
 
-async def _tts_for_stream(text: str, provider: str) -> bytes:
+async def _tts_for_stream(text: str, provider: str, language: str | None = None) -> bytes:
     """Generate TTS audio in the format expected by the chosen provider."""
     if provider == "twilio":
-        return await tts_service.text_to_speech_for_twilio(text)
-    return await tts_service.text_to_speech_for_call(text)
+        return await tts_service.text_to_speech_for_twilio(text, language=language)
+    return await tts_service.text_to_speech_for_call(text, language=language)
 
 
 async def _send_audio_stream(call_id: str, audio_bytes: bytes, provider: str):
@@ -812,6 +858,35 @@ async def _run_call(
         })
 
 
+
+@app.post("/api/end-call/{call_id}")
+async def end_call(call_id: str):
+    if call_id not in active_calls:
+        return JSONResponse(status_code=404, content={"error": "No active session."})
+    
+    # Check if the call is actually streaming/connected via provider SIDs
+    sid = twilio_call_sids.get(call_id)
+    provider = "twilio"
+    if not sid:
+        sid = exotel_call_sids.get(call_id)
+        provider = "exotel"
+        
+    if sid:
+        logger.info(f"[API] Manually ending {provider} call SID: {sid}")
+        # Dispatch the hangup command
+        asyncio.create_task(_end_call(sid, provider))
+        
+    # Cancel the backend task loop
+    task = call_tasks.get(call_id)
+    if task:
+        task.cancel()
+        
+    # Queue a sentinel to break receive_speech if waiting
+    queue = audio_queues.get(call_id)
+    if queue:
+        await queue.put(None)
+        
+    return JSONResponse(content={"status": "ok", "message": "Call termination triggered."})
 
 # ------------------------------------------------
 # Real Call Mode
@@ -890,6 +965,12 @@ async def _run_call_real(
         MAX_SILENT_ROUNDS = 3
         silent_rounds = 0
 
+        # Detected language for TTS (from user's original request)
+        call_lang = intent.detected_language
+
+        # Preserve the user's original language before the loop overwrites detected_language
+        intent._user_language = intent.detected_language or "en-IN"
+
         while True:
             await _send_to_browser(browser_ws, "agent_update", {
                 "agent": 2,
@@ -913,12 +994,12 @@ async def _run_call_real(
                 turn_count += 1
                 conversation_log.append({"speaker": "agent", "text": nudge})
                 try:
-                    stream_audio = await _tts_for_stream(nudge, provider)
+                    stream_audio = await _tts_for_stream(nudge, provider, language=call_lang)
                     await _send_audio_stream(call_id, stream_audio, provider)
                 except Exception as e:
                     logger.error(f"[Call] Nudge TTS failed: {e}")
                 try:
-                    mp3_nudge = await tts_service.text_to_speech_mp3(nudge)
+                    mp3_nudge = await tts_service.text_to_speech_mp3(nudge, language=call_lang)
                     nudge_b64 = base64.b64encode(mp3_nudge).decode()
                 except Exception:
                     nudge_b64 = ""
@@ -935,7 +1016,35 @@ async def _run_call_real(
 
             # Transcribe
             wav_bytes = pcm16_to_wav(speech_pcm)
-            transcript = await sarvam_stt.transcribe_audio(wav_bytes)
+            try:
+                # Force en-IN on the first turn because Sarvam's 'unknown' transliterates
+                # mixed-language IVR menus entirely into one regional script (e.g. Telugu).
+                # en-IN keeps mixed languages exactly as spoken in Roman script.
+                if turn_count == 0:
+                    stt_result = await sarvam_stt.transcribe_audio(wav_bytes, language="en-IN")
+                    # Prevent forcing the agent into English just because we used en-IN for exact transcription.
+                    # Keep the user's preferred language for the first turn unless they switch next turn.
+                    if hasattr(intent, '_user_language') and intent._user_language:
+                        stt_result["language_code"] = intent._user_language
+                else:
+                    stt_result = await sarvam_stt.transcribe_audio(wav_bytes, language="unknown")
+            except Exception as e:
+                logger.error(f"[Call] STT transcription failed: {e}")
+                await _send_to_browser(browser_ws, "agent_update", {
+                    "agent": 2,
+                    "text": "STT failed, listening again...",
+                    "active": True,
+                })
+                continue
+            transcript = stt_result["transcript"]
+
+            # Dynamically adapt to the other party's language
+            other_lang = stt_result.get("language_code")
+            if other_lang and other_lang != "unknown":
+                if other_lang != call_lang:
+                    logger.info(f"[Call] Language switched: {call_lang} -> {other_lang}")
+                call_lang = other_lang
+                intent.detected_language = other_lang
 
             if not transcript or len(transcript.strip()) < 2:
                 logger.info("[Call] Empty transcript, continuing...")
@@ -971,19 +1080,36 @@ async def _run_call_real(
                 display_text = agent_action.speech_text or ""
                 if display_text:
                     try:
-                        stream_audio = await _tts_for_stream(display_text, provider)
+                        stream_audio = await _tts_for_stream(display_text, provider, language=call_lang)
                         await _send_audio_stream(call_id, stream_audio, provider)
                     except Exception as e:
                         logger.error(f"[Call] Agent stream TTS failed: {e}")
                     try:
-                        mp3 = await tts_service.text_to_speech_mp3(display_text)
+                        mp3 = await tts_service.text_to_speech_mp3(display_text, language=call_lang)
                         agent_audio_b64 = base64.b64encode(mp3).decode()
                     except Exception as e:
                         logger.error(f"[Call] Agent browser TTS failed: {e}")
 
             elif agent_action.action_type == ActionType.DTMF:
-                display_text = f"[Pressed {agent_action.dtmf_digits}]"
-                logger.info(f"[Call] DTMF action (agent should speak instead): {agent_action.dtmf_digits}")
+                digits = agent_action.dtmf_digits or ""
+                display_text = f"[Pressed {digits}]"
+                logger.info(f"[Call] Sending DTMF: {digits}")
+                # Send real DTMF (Twilio API) or audio tones (Exotel)
+                try:
+                    await _send_dtmf_to_stream(call_id, digits, provider)
+                except Exception as e:
+                    logger.error(f"[Call] DTMF send failed: {e}")
+                # Also speak the digit as TTS fallback for the stream
+                try:
+                    stream_audio = await _tts_for_stream(digits, provider, language=call_lang)
+                    await _send_audio_stream(call_id, stream_audio, provider)
+                except Exception as e:
+                    logger.error(f"[Call] DTMF TTS fallback failed: {e}")
+                try:
+                    mp3 = await tts_service.text_to_speech_mp3(digits, language=call_lang)
+                    agent_audio_b64 = base64.b64encode(mp3).decode()
+                except Exception:
+                    pass
 
             elif agent_action.action_type == ActionType.WAIT:
                 display_text = f"[Waiting: {agent_action.reasoning}]"
@@ -1030,10 +1156,21 @@ async def _run_call_real(
 
         if provider == "twilio":
             if "not allowed to call" in err_str or "21215" in err_str:
+                # Detect country from phone prefix for a helpful error
+                _COUNTRY_MAP = {
+                    "+1": "United States", "+91": "India", "+44": "United Kingdom",
+                    "+61": "Australia", "+81": "Japan", "+49": "Germany",
+                    "+33": "France", "+86": "China", "+971": "UAE",
+                }
+                country = "the target country"
+                for prefix, name in sorted(_COUNTRY_MAP.items(), key=lambda x: -len(x[0])):
+                    if target_phone.startswith(prefix):
+                        country = name
+                        break
                 user_msg = (
                     f"Twilio blocked the call to {target_phone}. "
-                    "Go to console.twilio.com > Voice > Settings > Geo Permissions "
-                    "and enable India. Save and retry."
+                    f"Go to console.twilio.com > Voice > Settings > Geo Permissions "
+                    f"and enable {country}. Save and retry."
                 )
             elif "21219" in err_str or "unverified" in err_str.lower():
                 user_msg = (
@@ -1071,6 +1208,76 @@ async def _run_call_real(
 
 
 # ------------------------------------------------
+# DTMF -- Send Real DTMF Tones
+# ------------------------------------------------
+
+async def _send_dtmf_to_stream(call_id: str, digits: str, provider: str):
+    """
+    Send real DTMF tones during a call as in-band audio.
+
+    For Twilio: Sends mulaw-encoded DTMF tones through the media stream.
+    For Exotel: Sends slin16 PCM DTMF tones through the stream.
+    """
+    if provider == "twilio":
+        for d in digits:
+            tone = generate_dtmf_tone_mulaw(d)
+            if tone:
+                await _send_audio_to_twilio(call_id, tone)
+    else:
+        for d in digits:
+            tone = generate_dtmf_tone(d)
+            if tone:
+                await _send_audio_to_exotel(call_id, tone)
+
+    logger.info(f"[DTMF] DTMF '{digits}' sent for call {call_id} ({provider})")
+
+
+class _DTMFBody(BaseModel):
+    digits: str
+
+
+@app.post("/api/send-dtmf/{call_id}")
+async def send_dtmf(call_id: str, body: _DTMFBody):
+    """Send DTMF tones during an active call (triggered from the frontend dialpad)."""
+    if call_id not in active_calls:
+        return JSONResponse(status_code=404, content={"error": "No active call."})
+
+    call_state = active_calls[call_id]
+    if call_state.status not in (CallStatus.IN_PROGRESS, CallStatus.INITIATING, CallStatus.RINGING):
+        # Also allow during ringing — some IVRs start immediately
+        pass
+
+    digits = body.digits.strip()
+    if not digits or not all(d in '0123456789*#' for d in digits):
+        return JSONResponse(status_code=400, content={"error": "Invalid digits. Use 0-9, *, #."})
+
+    # Determine provider from active stream state
+    provider = "twilio" if call_id in twilio_streams else "exotel"
+
+    logger.info(f"[DTMF] Frontend requested: '{digits}' for call {call_id} ({provider})")
+
+    try:
+        await _send_dtmf_to_stream(call_id, digits, provider)
+    except Exception as e:
+        logger.error(f"[DTMF] Failed to send '{digits}': {e}")
+        return JSONResponse(status_code=500, content={"error": f"DTMF send failed: {e}"})
+
+    # Notify the browser
+    browser_ws = browser_connections.get(call_id)
+    if browser_ws:
+        await _send_to_browser(browser_ws, "call_turn", {
+            "speaker": "agent",
+            "text": f"[Pressed {digits}]",
+            "audio_b64": "",
+            "turn": 0,
+            "action_type": "dtmf",
+            "dtmf_digits": digits,
+        })
+
+    return JSONResponse(content={"status": "ok", "digits": digits})
+
+
+# ------------------------------------------------
 # Health Check & API
 # ------------------------------------------------
 
@@ -1100,6 +1307,39 @@ async def list_calls():
         }
         for call_id, state in active_calls.items()
     }
+
+
+# ------------------------------------------------
+# Phone Registry API
+# ------------------------------------------------
+
+@app.get("/api/registry")
+async def get_registry():
+    """Return all contacts in the phone registry."""
+    return phone_registry.list_all()
+
+
+
+class _ContactBody(BaseModel):
+    name: str
+    phone: str
+    category: str = "other"
+
+
+@app.post("/api/registry")
+async def add_registry_contact(body: _ContactBody):
+    """Add or update a contact in the phone registry."""
+    entry = phone_registry.add(body.name, body.phone, body.category)
+    return entry
+
+
+@app.delete("/api/registry/{key}")
+async def delete_registry_contact(key: str):
+    """Delete a contact from the phone registry."""
+    deleted = phone_registry.delete(key)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "Contact not found."})
+    return {"status": "ok", "deleted": key}
 
 
 # ------------------------------------------------

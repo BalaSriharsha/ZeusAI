@@ -30,7 +30,7 @@ async def transcribe_audio(
     audio_bytes: bytes,
     language: str = "unknown",
     prompt: str = "",
-) -> str:
+) -> dict:
     """
     Transcribe an audio buffer using Sarvam AI STT.
 
@@ -41,7 +41,7 @@ async def transcribe_audio(
         prompt: Unused (kept for API compatibility with previous Groq STT).
 
     Returns:
-        Transcription text.
+        Dict with "transcript" (str) and "language_code" (str).
     """
     headers = {"api-subscription-key": settings.sarvam_api_key}
 
@@ -64,7 +64,7 @@ async def transcribe_audio(
     transcript = result.get("transcript", "").strip()
     detected = result.get("language_code") or "unknown"
     logger.info(f"[STT] Transcribed [{detected}]: {transcript[:100]}...")
-    return transcript
+    return {"transcript": transcript, "language_code": detected}
 
 
 async def transcribe_audio_verbose(
@@ -79,15 +79,18 @@ async def transcribe_audio_verbose(
     so a single segment covering the full audio is returned.
 
     Returns:
-        {"text": str, "segments": [{"start": 0.0, "end": 30.0, "text": str}]}
+        {"text": str, "language_code": str, "segments": [{...}]}
     """
-    transcript = await transcribe_audio(audio_bytes, language=language)
+    result = await transcribe_audio(audio_bytes, language=language)
+    transcript = result["transcript"]
+    language_code = result["language_code"]
 
     if not transcript:
-        return {"text": "", "segments": []}
+        return {"text": "", "language_code": language_code, "segments": []}
 
     return {
         "text": transcript,
+        "language_code": language_code,
         "segments": [
             {
                 "start": 0.0,

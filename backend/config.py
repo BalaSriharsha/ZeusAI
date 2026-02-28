@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # User profile defaults
     default_user_name: str = Field("Bala", alias="DEFAULT_USER_NAME")
     default_user_phone: str = Field("9304566336", alias="DEFAULT_USER_PHONE")
+    default_dob: str = Field("21/06/1998", alias="DEFAULT_DATE_OF_BIRTH")
+    default_age: str = Field("28", alias="DEFAULT_AGE")
+    default_gender: str = Field("Female", alias="DEFAULT_GENDER")
+    default_weight: str = Field("70kg", alias="DEFAULT_WEIGHT")
+    default_height: str = Field("5 feet 2 inches", alias="DEFAULT_HEIGHT")
 
     # Phone registry (JSON string mapping entity names to phone numbers)
     # Supports both PHONE_REGISTRY and legacy HOSPITAL_REGISTRY env var names

@@ -42,19 +42,36 @@ def _normalize(text: str) -> str:
 class InputAgent:
     """Processes user input and prepares a call session."""
 
-    def __init__(self):
-        self.hospital_numbers = settings.get_hospital_numbers()
+    def __init__(self, registry=None):
+        """
+        Args:
+            registry: Either a PhoneRegistry object (preferred, always live)
+                      or a static dict {key: phone} (legacy/fallback).
+        """
+        self._registry_obj = None
+        if registry is not None and hasattr(registry, 'get_phone_numbers'):
+            # Live registry object — lookups always get fresh data
+            self._registry_obj = registry
+            self.hospital_numbers = registry.get_phone_numbers()
+        elif registry is not None:
+            self.hospital_numbers = registry
+        else:
+            self.hospital_numbers = settings.get_hospital_numbers()
         logger.info(
             f"[Agent1] Loaded registry with {len(self.hospital_numbers)} entries: "
             f"{list(self.hospital_numbers.keys())}"
         )
 
     async def process_voice_input(self, audio_bytes: bytes) -> UserIntent:
-        """Transcribe audio via Groq Whisper, then extract intent."""
-        raw_text = await sarvam_stt.transcribe_audio(audio_bytes)
-        logger.info(f"[Agent1] User said: {raw_text}")
+        """Transcribe audio via Sarvam STT, then extract intent."""
+        stt_result = await sarvam_stt.transcribe_audio(audio_bytes)
+        raw_text = stt_result["transcript"]
+        detected_lang = stt_result.get("language_code", "unknown")
+        logger.info(f"[Agent1] User said [{detected_lang}]: {raw_text}")
         intent = await self._extract_intent(raw_text)
         intent.raw_text = raw_text
+        if detected_lang and detected_lang != "unknown":
+            intent.detected_language = detected_lang
         return intent
 
     async def process_text_input(self, text: str) -> UserIntent:
@@ -62,6 +79,11 @@ class InputAgent:
         logger.info(f"[Agent1] User typed: {text}")
         intent = await self._extract_intent(text)
         intent.raw_text = text
+        # For text input, detect language from the extracted intent or infer from text
+        if not intent.detected_language:
+            lang = await self._detect_language(text)
+            if lang:
+                intent.detected_language = lang
         return intent
 
     async def _extract_intent(self, text: str) -> UserIntent:
@@ -81,6 +103,11 @@ class InputAgent:
             appointment_date=raw.get("appointment_date"),
             user_name=raw.get("user_name") or settings.default_user_name,
             user_phone=raw.get("user_phone") or settings.default_user_phone,
+            user_dob=raw.get("user_dob") or settings.default_dob,
+            user_age=raw.get("user_age") or settings.default_age,
+            user_gender=raw.get("user_gender") or settings.default_gender,
+            user_weight=raw.get("user_weight") or settings.default_weight,
+            user_height=raw.get("user_height") or settings.default_height,
         )
 
         # Auto-fill target_entity from hospital_name if not set
@@ -122,6 +149,31 @@ class InputAgent:
             desc += f" ({intent.doctor_specialty})"
         return desc
 
+    async def _detect_language(self, text: str) -> Optional[str]:
+        """Detect language of text input using Groq LLM."""
+        try:
+            result = await groq_llm.extract_json([
+                {
+                    "role": "system",
+                    "content": (
+                        "Detect the language of the user's text. "
+                        "Return JSON: {\"language_code\": \"xx-IN\"} "
+                        "where xx-IN is one of: en-IN, hi-IN, te-IN, ta-IN, "
+                        "kn-IN, ml-IN, mr-IN, bn-IN, gu-IN, pa-IN, od-IN. "
+                        "If the language is not Indian, return "
+                        "{\"language_code\": \"en-IN\"}."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ])
+            lang = result.get("language_code")
+            if lang:
+                logger.info(f"[Agent1] Detected language for text: {lang}")
+            return lang
+        except Exception as e:
+            logger.warning(f"[Agent1] Language detection failed: {e}")
+            return None
+
     def resolve_target_phone(self, intent: UserIntent) -> Optional[str]:
         """
         Determine the phone number to call.
@@ -132,6 +184,9 @@ class InputAgent:
           3. Registry lookup by target_entity
           4. None (will use simulation)
         """
+        # Refresh from live registry if available
+        if self._registry_obj is not None:
+            self.hospital_numbers = self._registry_obj.get_phone_numbers()
         # 1. Already has a target phone from user input
         if intent.target_phone:
             logger.info(f"[Agent1] Target phone from intent: {intent.target_phone}")

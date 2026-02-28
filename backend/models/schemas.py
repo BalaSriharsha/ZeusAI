@@ -42,6 +42,14 @@ class UserIntent(BaseModel):
     # User details
     user_name: Optional[str] = None
     user_phone: Optional[str] = None
+    user_dob: Optional[str] = None
+    user_age: Optional[str] = None
+    user_gender: Optional[str] = None
+    user_weight: Optional[str] = None
+    user_height: Optional[str] = None
+
+    # Detected language from STT (e.g. "hi-IN", "te-IN", "en-IN")
+    detected_language: Optional[str] = None
 
     raw_text: str = ""
 

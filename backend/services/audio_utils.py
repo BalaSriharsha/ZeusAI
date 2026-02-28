@@ -49,6 +49,16 @@ def mulaw_to_pcm_bytes(mulaw_bytes: bytes) -> bytes:
     return struct.pack(f"<{len(samples)}h", *samples)
 
 
+def pcm_to_mulaw_bytes(pcm_bytes: bytes) -> bytes:
+    """
+    Convert raw signed 16-bit little-endian PCM to raw mulaw bytes.
+    Used to prepare TTS audio for Twilio Media Streams.
+    """
+    num_samples = len(pcm_bytes) // 2
+    linear_samples = struct.unpack(f"<{num_samples}h", pcm_bytes)
+    return bytes(_linear_to_mulaw(s) for s in linear_samples)
+
+
 def chunk_energy(data: bytes) -> float:
     """Calculate average absolute amplitude of a slin16 PCM chunk."""
     num_samples = len(data) // 2
@@ -131,3 +141,101 @@ async def receive_speech(
         return bytes()
 
     return bytes(audio_buffer)
+
+
+# ------------------------------------------------
+# DTMF Tone Generation
+# ------------------------------------------------
+
+# ITU-T standard DTMF frequency pairs
+_DTMF_FREQS: dict[str, tuple[int, int]] = {
+    "1": (697, 1209), "2": (697, 1336), "3": (697, 1477),
+    "4": (770, 1209), "5": (770, 1336), "6": (770, 1477),
+    "7": (852, 1209), "8": (852, 1336), "9": (852, 1477),
+    "*": (941, 1209), "0": (941, 1336), "#": (941, 1477),
+}
+
+import math
+
+def generate_dtmf_tone(
+    digit: str,
+    sample_rate: int = 8000,
+    duration: float = 0.25,
+    gap: float = 0.05,
+    amplitude: float = 0.5,
+) -> bytes:
+    """
+    Generate a DTMF tone as raw slin16 PCM (16-bit, mono, little-endian).
+
+    Works directly for Exotel streams. For Twilio, convert to mulaw
+    with generate_dtmf_tone_mulaw().
+
+    Args:
+        digit: One of 0-9, *, #
+        sample_rate: Sample rate in Hz (8000 for telephony)
+        duration: Tone duration in seconds
+        gap: Silence gap after the tone in seconds
+        amplitude: Volume (0.0 to 1.0)
+
+    Returns:
+        Raw slin16 PCM bytes (tone + silence gap)
+    """
+    freqs = _DTMF_FREQS.get(digit)
+    if not freqs:
+        logger.warning(f"[DTMF] Unknown digit: {digit}")
+        return b""
+
+    f1, f2 = freqs
+    max_val = 32767 * amplitude
+    num_tone_samples = int(sample_rate * duration)
+    num_gap_samples = int(sample_rate * gap)
+
+    samples = []
+    for i in range(num_tone_samples):
+        t = i / sample_rate
+        value = (math.sin(2 * math.pi * f1 * t) +
+                 math.sin(2 * math.pi * f2 * t)) / 2
+        samples.append(int(value * max_val))
+
+    # Silence gap
+    samples.extend([0] * num_gap_samples)
+
+    return struct.pack(f"<{len(samples)}h", *samples)
+
+
+def _linear_to_mulaw(sample: int) -> int:
+    """Encode a signed 16-bit linear PCM sample to mulaw byte."""
+    sign = 0x80 if sample < 0 else 0
+    val = sample if sample >= 0 else -sample
+    
+    if val > 32635:
+        val = 32635
+    val += 132
+    
+    exponent = 7
+    for exp in range(7, -1, -1):
+        if val & (0x80 << exp):
+            exponent = exp
+            break
+            
+    mantissa = (val >> (exponent + 3)) & 0x0F
+    return ~(sign | (exponent << 4) | mantissa) & 0xFF
+
+
+def generate_dtmf_tone_mulaw(
+    digit: str,
+    sample_rate: int = 8000,
+    duration: float = 0.25,
+    gap: float = 0.05,
+    amplitude: float = 0.5,
+) -> bytes:
+    """
+    Generate a DTMF tone as raw mulaw bytes (for Twilio streams).
+    """
+    pcm = generate_dtmf_tone(digit, sample_rate, duration, gap, amplitude)
+    if not pcm:
+        return b""
+    # Convert slin16 PCM to mulaw
+    num_samples = len(pcm) // 2
+    linear_samples = struct.unpack(f"<{num_samples}h", pcm)
+    return bytes(_linear_to_mulaw(s) for s in linear_samples)

@@ -109,7 +109,12 @@ Return JSON with these fields:
   "doctor_specialty": "string or null (e.g., Dermatologist, Neurologist)",
   "appointment_date": "string or null (preserve original format)",
   "user_name": "string or null",
-  "user_phone": "string or null"
+  "user_phone": "string or null",
+  "user_dob": "string or null (Date of Birth)",
+  "user_age": "string or null",
+  "user_gender": "string or null",
+  "user_weight": "string or null",
+  "user_height": "string or null"
 }
 
 Rules:

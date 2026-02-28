@@ -115,10 +115,11 @@ class CallMonitorAgent:
     async def _process_simple_transcription(self, audio_bytes: bytes) -> list[dict]:
         """Fallback: transcribe entire audio as a single turn."""
         try:
-            transcript = await sarvam_stt.transcribe_audio(
+            stt_result = await sarvam_stt.transcribe_audio(
                 audio_bytes,
                 prompt="Hospital IVR system speaking. May include menu options with numbers.",
             )
+            transcript = stt_result["transcript"]
         except Exception as e:
             logger.error(f"[Agent2] Simple transcription failed: {e}")
             return []

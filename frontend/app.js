@@ -48,9 +48,16 @@ var intentCard = $("#intentCard");
 var agentLog = $("#agentLog");
 var callSection = $("#callSection");
 var startCallBtn = $("#startCallBtn");
+var endCallBtn = $("#endCallBtn");
 var userNameInput = $("#userName");
 var userPhoneInput = $("#userPhone");
+var userDobInput = $("#userDob");
+var userAgeInput = $("#userAge");
+var userGenderInput = $("#userGender");
+var userWeightInput = $("#userWeight");
+var userHeightInput = $("#userHeight");
 var callHint = $("#callHint");
+var dtmfSection = $("#dtmfSection");
 
 // ------------------------------------------------
 // WebSocket Connection
@@ -150,6 +157,21 @@ function handleCallStatus(data) {
   if (data.default_phone && !userPhoneInput.value) {
     userPhoneInput.value = data.default_phone;
   }
+  if (data.default_dob && !userDobInput.value) {
+    userDobInput.value = data.default_dob;
+  }
+  if (data.default_age && !userAgeInput.value) {
+    userAgeInput.value = data.default_age;
+  }
+  if (data.default_gender && !userGenderInput.value) {
+    userGenderInput.value = data.default_gender;
+  }
+  if (data.default_weight && !userWeightInput.value) {
+    userWeightInput.value = data.default_weight;
+  }
+  if (data.default_height && !userHeightInput.value) {
+    userHeightInput.value = data.default_height;
+  }
 
   if (intent) {
     showIntent(intent);
@@ -163,7 +185,7 @@ function handleCallStatus(data) {
     updateStatus("calling", "Dialing...");
     callInProgress = true;
     var prov = (data.provider || selectedProvider || "").charAt(0).toUpperCase() +
-               (data.provider || selectedProvider || "").slice(1);
+      (data.provider || selectedProvider || "").slice(1);
     updateAgentLog(2, "Initiating " + prov + " call...", true);
   } else if (status === "ringing") {
     updateStatus("calling", "Ringing");
@@ -175,6 +197,8 @@ function handleCallStatus(data) {
     updateStatus("calling", "In Call");
     updateAgentLog(2, "Call connected", true);
     updateAgentLog(3, "Ready", false);
+    // Show DTMF dialpad
+    if (dtmfSection) dtmfSection.style.display = "block";
   } else if (status === "sms_sent") {
     updateStatus("connected", "SMS Sent");
   }
@@ -192,7 +216,9 @@ function handleTranscript(data) {
 function handleReadyForCall(data) {
   currentCallId = data.call_id;
   callSection.classList.add("active");
+  startCallBtn.style.display = "block";
   startCallBtn.disabled = false;
+  endCallBtn.style.display = "none";
   addMessage("system", "System", data.message);
   callStateEl.textContent = "Ready";
 
@@ -236,7 +262,11 @@ function handleCallComplete(data) {
   updateAgentLog(3, "Idle", false);
 
   startCallBtn.disabled = false;
+  startCallBtn.style.display = "block";
   startCallBtn.querySelector("span").textContent = "Start Call";
+  endCallBtn.style.display = "none";
+  // Hide DTMF dialpad
+  if (dtmfSection) dtmfSection.style.display = "none";
 }
 
 function handleAgentUpdate(data) {
@@ -288,7 +318,7 @@ function addMessageWithAudio(type, label, text, audioB64) {
     if (btn) {
       btn.addEventListener("click", function () {
         audio.currentTime = 0;
-        audio.play().catch(function () {});
+        audio.play().catch(function () { });
         btn.classList.add("playing");
         audio.onended = function () {
           btn.classList.remove("playing");
@@ -373,6 +403,7 @@ function showIntent(intent) {
     ["Date", intent.appointment_date],
     ["Name", intent.user_name],
     ["Phone", intent.user_phone],
+    ["Language", intent.detected_language],
   ].filter(function (pair) { return pair[1]; });
 
   intentCard.innerHTML = fields
@@ -423,6 +454,11 @@ function sendText() {
       text: text,
       user_name: userNameInput.value.trim(),
       user_phone: userPhoneInput.value.trim(),
+      user_dob: userDobInput.value.trim(),
+      user_age: userAgeInput.value.trim(),
+      user_gender: userGenderInput.value.trim(),
+      user_weight: userWeightInput.value.trim(),
+      user_height: userHeightInput.value.trim(),
     },
   }));
   textInput.value = "";
@@ -473,6 +509,11 @@ function startRecording() {
                 audio: base64,
                 user_name: userNameInput.value.trim(),
                 user_phone: userPhoneInput.value.trim(),
+                user_dob: userDobInput.value.trim(),
+                user_age: userAgeInput.value.trim(),
+                user_gender: userGenderInput.value.trim(),
+                user_weight: userWeightInput.value.trim(),
+                user_height: userHeightInput.value.trim(),
               },
             }));
           }
@@ -510,7 +551,11 @@ function startCall() {
   if (!currentCallId) return;
 
   startCallBtn.disabled = true;
+  startCallBtn.style.display = "none";
   startCallBtn.querySelector("span").textContent = "Calling...";
+  endCallBtn.style.display = "block";
+  endCallBtn.disabled = false;
+  endCallBtn.querySelector("span").textContent = "End Call";
   callInProgress = true;
 
   audioQueue = [];
@@ -534,8 +579,76 @@ function startCall() {
       console.error("Start call error:", err);
       addMessage("error", "Error", "Failed to start call: " + err.message);
       startCallBtn.disabled = false;
+      startCallBtn.style.display = "block";
       startCallBtn.querySelector("span").textContent = "Start Call";
+      endCallBtn.style.display = "none";
       callInProgress = false;
+    });
+}
+
+// ------------------------------------------------
+// DTMF -- Send Digits
+// ------------------------------------------------
+
+function sendDTMF(digit) {
+  if (!currentCallId || !callInProgress) return;
+
+  var btn = document.querySelector('.dtmf-btn[data-digit="' + digit + '"]');
+  if (btn) {
+    btn.classList.add("pressed");
+    setTimeout(function () { btn.classList.remove("pressed"); }, 200);
+  }
+
+  fetch("/api/send-dtmf/" + currentCallId, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ digits: digit }),
+  })
+    .then(function (resp) {
+      if (!resp.ok) {
+        return resp.json().then(function (body) {
+          addMessage("error", "Error", "DTMF failed: " + (body.error || "Unknown"));
+        });
+      }
+    })
+    .catch(function (err) {
+      console.error("DTMF error:", err);
+    });
+}
+
+// Bind DTMF button clicks
+document.querySelectorAll(".dtmf-btn").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    sendDTMF(this.getAttribute("data-digit"));
+  });
+});
+
+// Keyboard shortcuts for DTMF during active call
+document.addEventListener("keydown", function (e) {
+  if (!callInProgress) return;
+  // Don't capture when typing in an input/textarea
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+  var key = e.key;
+  if ("0123456789*#".indexOf(key) !== -1) {
+    e.preventDefault();
+    sendDTMF(key);
+  }
+});
+
+// ------------------------------------------------
+// End Call
+// ------------------------------------------------
+
+function endCall() {
+  if (!currentCallId || !callInProgress) return;
+
+  endCallBtn.disabled = true;
+  endCallBtn.querySelector("span").textContent = "Ending...";
+
+  fetch("/api/end-call/" + currentCallId, { method: "POST" })
+    .catch(function (err) {
+      console.error("End call error:", err);
     });
 }
 
@@ -546,6 +659,7 @@ function startCall() {
 sendBtn.addEventListener("click", sendText);
 micBtn.addEventListener("click", toggleRecording);
 startCallBtn.addEventListener("click", startCall);
+if (endCallBtn) endCallBtn.addEventListener("click", endCall);
 
 // Provider selector
 document.querySelectorAll("input[name='provider']").forEach(function (radio) {
@@ -582,7 +696,119 @@ textInput.addEventListener("keydown", function (e) {
 });
 
 // ------------------------------------------------
+// Contacts Panel
+// ------------------------------------------------
+
+var contactsList = $("#contactsList");
+var contactsCount = $("#contactsCount");
+var contactsBody = $("#contactsBody");
+var contactsToggle = $("#contactsToggle");
+var contactsChevron = $("#contactsChevron");
+var addContactBtn = $("#addContactBtn");
+var addNameInput = $("#addName");
+var addPhoneInput = $("#addPhone");
+var addCategorySelect = $("#addCategory");
+var contactsExpanded = true;
+
+var CATEGORY_COLORS = {
+  hospital: "var(--accent2)",
+  bank: "var(--accent3)",
+  person: "var(--accent)",
+  other: "var(--text-muted)",
+};
+
+function loadContacts() {
+  fetch("/api/registry")
+    .then(function (resp) { return resp.json(); })
+    .then(function (contacts) {
+      contactsCount.textContent = contacts.length;
+      contactsList.innerHTML = "";
+      if (contacts.length === 0) {
+        contactsList.innerHTML =
+          '<div class="contacts-empty">No contacts yet. Add one below.</div>';
+        return;
+      }
+      contacts.forEach(function (c) {
+        var color = CATEGORY_COLORS[c.category] || CATEGORY_COLORS.other;
+        var div = document.createElement("div");
+        div.className = "contact-card";
+        div.innerHTML =
+          '<div class="contact-info">' +
+          '<span class="contact-cat" style="background:' + color + '">' +
+          escapeHtml(c.category.charAt(0).toUpperCase()) + "</span>" +
+          '<div class="contact-details">' +
+          '<span class="contact-name">' + escapeHtml(c.name) + "</span>" +
+          '<span class="contact-phone">' + escapeHtml(c.phone) + "</span>" +
+          "</div></div>" +
+          '<button class="contact-del" data-key="' + escapeHtml(c.key) +
+          '" title="Delete">&times;</button>';
+        contactsList.appendChild(div);
+      });
+      // Bind delete buttons
+      contactsList.querySelectorAll(".contact-del").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          deleteContact(this.getAttribute("data-key"));
+        });
+      });
+    })
+    .catch(function (err) {
+      console.error("Failed to load contacts:", err);
+    });
+}
+
+function addContact() {
+  var name = addNameInput.value.trim();
+  var phone = addPhoneInput.value.trim();
+  var category = addCategorySelect.value;
+  if (!name || !phone) return;
+
+  fetch("/api/registry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name, phone: phone, category: category }),
+  })
+    .then(function (resp) {
+      if (!resp.ok) throw new Error("Failed to add contact");
+      addNameInput.value = "";
+      addPhoneInput.value = "";
+      loadContacts();
+    })
+    .catch(function (err) {
+      console.error("Add contact error:", err);
+    });
+}
+
+function deleteContact(key) {
+  fetch("/api/registry/" + encodeURIComponent(key), { method: "DELETE" })
+    .then(function (resp) {
+      if (!resp.ok) throw new Error("Failed to delete contact");
+      loadContacts();
+    })
+    .catch(function (err) {
+      console.error("Delete contact error:", err);
+    });
+}
+
+contactsToggle.addEventListener("click", function () {
+  contactsExpanded = !contactsExpanded;
+  contactsBody.style.display = contactsExpanded ? "block" : "none";
+  contactsChevron.style.transform = contactsExpanded ? "rotate(0)" : "rotate(-90deg)";
+});
+
+addContactBtn.addEventListener("click", addContact);
+
+// Enter key on add inputs
+addNameInput.addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); addContact(); }
+});
+addPhoneInput.addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); addContact(); }
+});
+
+
+// ------------------------------------------------
 // Initialize
 // ------------------------------------------------
 
+loadContacts();
 connect();
